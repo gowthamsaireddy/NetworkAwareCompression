@@ -5,8 +5,9 @@ PROTOCOL_VERSION: int = 1
 DEFAULT_PORT: int = 5000
 DEFAULT_HOST: str = "0.0.0.0"
 
-# Header framing: 4-byte magic number, 2-byte version, 4-byte payload length
-MAGIC_BYTES: bytes = b"NAC1"  # Network-Aware Compression v1
+# Header framing: 4-byte magic number, 2-byte version
+MAGIC_BYTES: bytes = b"NAC1"  # Network-Aware Compression Image Frame v1
+ACK_MAGIC_BYTES: bytes = b"NACK"  # Network-Aware Compression ACK Frame v1
 
 # Acknowledgement status codes
 ACK_OK: int = 0
