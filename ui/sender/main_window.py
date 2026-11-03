@@ -108,3 +108,23 @@ class SenderMainWindow(QMainWindow):
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
 
+        # Wire cross-view dataflow
+        self._connect_view_signals()
+
+    def _connect_view_signals(self):
+        # 1. Dataset selection forwards to Compression view
+        self.dataset_view.image_selected.connect(self.compression_view.load_dataset_item)
+
+        # 2. Dataset scan updates dashboard metrics
+        self.dataset_view.dataset_scanned.connect(self._on_dataset_scanned)
+
+        # 3. Compression completion forwards payload to Transmission view
+        self.compression_view.compression_completed.connect(self.transmission_view.set_payload)
+
+    def _on_dataset_scanned(self, total_count: int, stats: dict):
+        if total_count > 0:
+            val_text = f"{total_count} ({stats.get('benign',0)}B, {stats.get('malignant',0)}M, {stats.get('normal',0)}N)"
+        else:
+            val_text = "0 images found"
+        self.dashboard_view.card_dataset.set_value(val_text)
+

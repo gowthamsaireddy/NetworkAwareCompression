@@ -1,6 +1,9 @@
 """Receiver Image Viewer & Inspection View."""
 
+from pathlib import Path
+from typing import List, Optional, Tuple
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -10,10 +13,12 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 from shared.constants import STATUS_NO_DATA
+from shared.metadata import TransmissionMetadata
 from ui.shared.widgets import ImagePreviewBox, MetricBox, SectionHeader
 
 
@@ -22,6 +27,7 @@ class ReceiverImageView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.received_items: List[Tuple[TransmissionMetadata, Path]] = []
         self.init_ui()
 
     def init_ui(self):
@@ -82,3 +88,39 @@ class ReceiverImageView(QWidget):
         splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, stretch=1)
 
+        # Table click handler
+        self.table.itemSelectionChanged.connect(self._on_table_selection)
+
+    def add_received_image(self, metadata: TransmissionMetadata, save_path: Path):
+        """Adds a verified received image to the inspection catalog."""
+        self.received_items.append((metadata, save_path))
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(metadata.image_id))
+        self.table.setItem(row, 1, QTableWidgetItem(f"Q{metadata.compression_quality}"))
+        self.table.setItem(row, 2, QTableWidgetItem(str(metadata.image_byte_length)))
+        self.table.setItem(row, 3, QTableWidgetItem(metadata.image_format))
+
+        # Select the newly added row
+        self.table.selectRow(row)
+
+    def _on_table_selection(self):
+        selected_rows = self.table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+
+        row = selected_rows[0].row()
+        if 0 <= row < len(self.received_items):
+            metadata, save_path = self.received_items[row]
+            if save_path.exists():
+                pixmap = QPixmap(str(save_path))
+                caption = (
+                    f"{metadata.image_id} | Q{metadata.compression_quality} | "
+                    f"{metadata.image_width}×{metadata.image_height} | {metadata.image_byte_length:,} bytes"
+                )
+                self.preview_box.set_pixmap(pixmap, caption=caption)
+
+            self.card_dimensions.set_value(f"{metadata.image_width} × {metadata.image_height}")
+            self.card_quality.set_value(f"Q{metadata.compression_quality}")
+            self.card_orig_size.set_value(f"{metadata.original_file_size:,} B")
+            self.card_comp_size.set_value(f"{metadata.compressed_file_size:,} B")

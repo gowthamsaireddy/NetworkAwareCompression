@@ -108,3 +108,21 @@ class ReceiverMainWindow(QMainWindow):
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
 
+        # Wire cross-view dataflow
+        self._connect_receiver_signals()
+
+    def _connect_receiver_signals(self):
+        # Forward received verified images to ImageView and update Dashboard
+        self.tcp_view.bridge.image_received.connect(self._on_image_received)
+        self.tcp_view.bridge.status_changed.connect(self._on_server_status_changed)
+
+    def _on_image_received(self, metadata, image_bytes, verified, save_path, timestamp):
+        if verified and save_path is not None:
+            self.image_view.add_received_image(metadata, save_path)
+            total_count = len(self.image_view.received_items)
+            self.dashboard_view.card_received.set_value(str(total_count))
+
+    def _on_server_status_changed(self, is_running, message):
+        status_text = f"Listening ({self.tcp_view.server.port})" if is_running else "Stopped"
+        self.dashboard_view.card_server.set_value(status_text)
+
