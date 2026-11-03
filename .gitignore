@@ -60,6 +60,7 @@ data/*
 # Experiment outputs, run telemetry, and SQLite databases (Never commit run logs)
 experiments/*
 !experiments/README.md
+!experiments/analyze_results.py
 logs/
 *.log
 
