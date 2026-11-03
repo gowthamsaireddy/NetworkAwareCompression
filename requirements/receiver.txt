@@ -1,0 +1,9 @@
+# Receiver Application Requirements (Windows 11)
+-r common.txt
+
+opencv-python>=4.8.0
+scikit-image>=0.21.0
+matplotlib>=3.8.0
+torch>=2.0.0
+torchvision>=0.15.0
+

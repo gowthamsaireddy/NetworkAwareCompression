@@ -1,0 +1,10 @@
+# Sender Application Requirements (Ubuntu Linux VM / Host)
+-r common.txt
+
+opencv-python>=4.8.0
+scikit-image>=0.21.0
+matplotlib>=3.8.0
+
+# System-level requirements on Ubuntu:
+# sudo apt-get update && sudo apt-get install -y iproute2 libgl1
+

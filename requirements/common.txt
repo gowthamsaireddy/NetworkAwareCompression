@@ -1,0 +1,6 @@
+# Common dependencies for both Sender (Ubuntu) and Receiver (Windows 11)
+numpy>=1.24.0
+pandas>=2.0.0
+Pillow>=10.0.0
+PyQt6>=6.5.0
+

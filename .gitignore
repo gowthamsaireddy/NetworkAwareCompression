@@ -1,0 +1,69 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE / Editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# PyTorch checkpoints and large model weights (Never commit weights)
+*.pt
+*.pth
+*.onnx
+*.bin
+*.h5
+*.weights
+models/*
+!models/README.md
+
+# Dataset directories and image files (Never commit datasets)
+data/*
+!data/README.md
+
+# Experiment outputs, run telemetry, and SQLite databases (Never commit run logs)
+experiments/*
+!experiments/README.md
+logs/
+*.log
+
+# Temporary / OS files
+Thumbs.db
+Desktop.ini
+*.tmp
