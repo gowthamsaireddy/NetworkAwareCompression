@@ -1,6 +1,8 @@
 """Receiver U-Net Model Management View."""
 
 from pathlib import Path
+from typing import Optional
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -20,9 +22,11 @@ from ui.shared.widgets import MetricBox, SectionHeader
 class ReceiverModelView(QWidget):
     """Manages loading and freezing pre-trained deep learning checkpoint weights."""
 
-    def __init__(self, parent=None):
+    model_loaded = pyqtSignal(str)  # Emits status description
+
+    def __init__(self, model_manager: Optional[ModelManager] = None, parent=None):
         super().__init__(parent)
-        self.model_manager = ModelManager()
+        self.model_manager = model_manager or ModelManager()
         self.init_ui()
 
     def init_ui(self):
@@ -111,6 +115,9 @@ class ReceiverModelView(QWidget):
 
         success, msg = self.model_manager.load_checkpoint(Path(path_str))
         self.card_status.set_value(self.model_manager.get_status())
-        if not success:
-            QMessageBox.information(self, "Model Checkpoint", msg)
+        if success:
+            self.model_loaded.emit(self.model_manager.get_status())
+            QMessageBox.information(self, "Model Loaded", msg)
+        else:
+            QMessageBox.warning(self, "Checkpoint Error", msg)
 

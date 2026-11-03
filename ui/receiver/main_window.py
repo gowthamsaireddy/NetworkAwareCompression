@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from receiver.model_manager import ModelManager
 from ui.receiver.dashboard_view import ReceiverDashboardView
 from ui.receiver.evaluation_view import ReceiverEvaluationView
 from ui.receiver.image_view import ReceiverImageView
@@ -30,6 +31,7 @@ class ReceiverMainWindow(QMainWindow):
         self.resize(1200, 800)
         self.setMinimumSize(980, 640)
         self.setStyleSheet(APP_STYLESHEET)
+        self.model_manager = ModelManager()
         self.init_ui()
 
     def init_ui(self):
@@ -85,12 +87,12 @@ class ReceiverMainWindow(QMainWindow):
         # Stacked view container
         self.stack = QStackedWidget()
 
-        # Initialize view panels
+        # Initialize view panels with shared model manager
         self.dashboard_view = ReceiverDashboardView()
         self.tcp_view = ReceiverTCPView()
         self.image_view = ReceiverImageView()
-        self.model_view = ReceiverModelView()
-        self.segmentation_view = ReceiverSegmentationView()
+        self.model_view = ReceiverModelView(self.model_manager)
+        self.segmentation_view = ReceiverSegmentationView(self.model_manager)
         self.evaluation_view = ReceiverEvaluationView()
         self.results_view = ReceiverResultsView()
 
@@ -112,9 +114,21 @@ class ReceiverMainWindow(QMainWindow):
         self._connect_receiver_signals()
 
     def _connect_receiver_signals(self):
-        # Forward received verified images to ImageView and update Dashboard
+        # 1. Forward received verified images to ImageView and update Dashboard
         self.tcp_view.bridge.image_received.connect(self._on_image_received)
         self.tcp_view.bridge.status_changed.connect(self._on_server_status_changed)
+
+        # 2. Model loaded updates dashboard card
+        self.model_view.model_loaded.connect(self._on_model_loaded)
+
+        # 3. Selected image in catalog prepares segmentation and evaluation
+        self.image_view.image_selected.connect(self._on_image_selected_for_pipeline)
+
+        # 4. Completed segmentation forwards directly to evaluation view
+        self.segmentation_view.segmentation_completed.connect(self._on_segmentation_completed)
+
+        # 5. Evaluation completion updates dashboard metrics
+        self.evaluation_view.evaluation_completed.connect(self._on_evaluation_completed)
 
     def _on_image_received(self, metadata, image_bytes, verified, save_path, timestamp):
         if verified and save_path is not None:
@@ -125,4 +139,23 @@ class ReceiverMainWindow(QMainWindow):
     def _on_server_status_changed(self, is_running, message):
         status_text = f"Listening ({self.tcp_view.server.port})" if is_running else "Stopped"
         self.dashboard_view.card_server.set_value(status_text)
+
+    def _on_model_loaded(self, status_desc: str):
+        self.dashboard_view.card_model.set_value(status_desc)
+
+    def _on_image_selected_for_pipeline(self, metadata, save_path):
+        self.segmentation_view.set_active_image(save_path, metadata)
+
+    def _on_segmentation_completed(self, result, metadata):
+        self.evaluation_view.load_evaluation_data(
+            result,
+            metadata,
+            comp_image_path=self.segmentation_view.current_image_path,
+        )
+
+    def _on_evaluation_completed(self, metadata, dice, iou):
+        if dice is not None and iou is not None:
+            self.dashboard_view.card_eval.set_value(f"Dice: {dice:.4f} | IoU: {iou:.4f}")
+        else:
+            self.dashboard_view.card_eval.set_value("No GT Mask Found")
 

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from typing import List, Optional, Tuple
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
@@ -24,6 +24,8 @@ from ui.shared.widgets import ImagePreviewBox, MetricBox, SectionHeader
 
 class ReceiverImageView(QWidget):
     """Detailed visual inspection and navigation of received ultrasound images."""
+
+    image_selected = pyqtSignal(object, object)  # Emits (TransmissionMetadata, Path)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,3 +126,4 @@ class ReceiverImageView(QWidget):
             self.card_quality.set_value(f"Q{metadata.compression_quality}")
             self.card_orig_size.set_value(f"{metadata.original_file_size:,} B")
             self.card_comp_size.set_value(f"{metadata.compressed_file_size:,} B")
+            self.image_selected.emit(metadata, save_path)
