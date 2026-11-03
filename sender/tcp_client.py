@@ -62,6 +62,10 @@ class TCPTransmissionClient:
             logger.info(msg)
             return True, msg
         except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
             self.sock = None
             err = f"Connection to {self.host}:{self.port} failed: {e}"
             logger.error(err)

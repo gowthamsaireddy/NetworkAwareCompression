@@ -91,7 +91,10 @@ class SenderMainWindow(QMainWindow):
         self.compression_view = SenderCompressionView()
         self.network_view = SenderNetworkView()
         self.transmission_view = SenderTransmissionView()
-        self.adaptive_view = SenderAdaptiveView()
+        self.adaptive_view = SenderAdaptiveView(
+            tcp_client=self.transmission_view.client,
+            network_controller=self.network_view.controller,
+        )
         self.results_view = SenderResultsView()
 
         self.stack.addWidget(self.dashboard_view)
@@ -112,8 +115,9 @@ class SenderMainWindow(QMainWindow):
         self._connect_view_signals()
 
     def _connect_view_signals(self):
-        # 1. Dataset selection forwards to Compression view
+        # 1. Dataset selection forwards to Compression view and Adaptive view
         self.dataset_view.image_selected.connect(self.compression_view.load_dataset_item)
+        self.dataset_view.image_selected.connect(self.adaptive_view.set_dataset_item)
 
         # 2. Dataset scan updates dashboard metrics
         self.dataset_view.dataset_scanned.connect(self._on_dataset_scanned)
@@ -121,13 +125,18 @@ class SenderMainWindow(QMainWindow):
         # 3. Compression completion forwards payload (meta, bytes, psnr, ssim) to Transmission view
         self.compression_view.compression_completed.connect(self.transmission_view.set_payload)
 
-        # 4. Network profile change updates Transmission view and Dashboard
+        # 4. Network profile change updates Transmission view, Adaptive view, and Dashboard
         self.network_view.profile_changed.connect(self.transmission_view.set_active_network_profile)
+        self.network_view.profile_changed.connect(self.adaptive_view.set_active_network_profile)
         self.network_view.profile_changed.connect(self._on_network_profile_changed)
 
-        # 5. Recorded trials update Results view and Dashboard
+        # 5. Recorded trials update Results view, Dashboard, and Adaptive EWMA
         self.transmission_view.trial_recorded.connect(self.results_view.load_records)
         self.transmission_view.trial_recorded.connect(self._on_trial_recorded)
+        self.transmission_view.trial_recorded.connect(self._on_transmission_trial_recorded)
+
+        self.adaptive_view.trial_recorded.connect(self.results_view.load_records)
+        self.adaptive_view.trial_recorded.connect(self._on_trial_recorded)
 
     def _on_dataset_scanned(self, total_count: int, stats: dict):
         if total_count > 0:
@@ -144,4 +153,8 @@ class SenderMainWindow(QMainWindow):
 
     def _on_trial_recorded(self, record):
         self.dashboard_view.card_transfers.set_value(f"{record.image_id} (Q{record.compression_quality})")
+
+    def _on_transmission_trial_recorded(self, record):
+        if record.measured_throughput_kbps and record.measured_throughput_kbps > 0:
+            self.adaptive_view.update_measured_throughput(record.measured_throughput_kbps)
 
