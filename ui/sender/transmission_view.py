@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from common.results_manager import ExperimentRecord, ResultsManager
+from sender.network_control import NetworkProfile, compute_theoretical_transmission_time
 from sender.tcp_client import TCPTransmissionClient, TransmissionReport
 from shared.constants import (
     DEFAULT_PORT,
@@ -51,11 +53,17 @@ class SingleTransmissionWorker(QThread):
 class SenderTransmissionView(QWidget):
     """Controls TCP transmission of compressed images to the Receiver."""
 
+    trial_recorded = pyqtSignal(object)  # Emits ExperimentRecord
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.client = TCPTransmissionClient()
+        self.results_manager = ResultsManager()
         self._current_metadata: TransmissionMetadata | None = None
         self._current_image_bytes: bytes | None = None
+        self._current_psnr: float | None = None
+        self._current_ssim: float | None = None
+        self._active_profile: NetworkProfile | None = None
         self._worker: SingleTransmissionWorker | None = None
         self.init_ui()
 
@@ -169,10 +177,22 @@ class SenderTransmissionView(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
 
-    def set_payload(self, metadata: TransmissionMetadata, image_bytes: bytes):
-        """Sets the active payload to be transmitted."""
+    def set_payload(
+        self,
+        metadata: TransmissionMetadata,
+        image_bytes: bytes,
+        psnr: float | None = None,
+        ssim: float | None = None,
+    ):
+        """Sets the active payload to be transmitted along with distortion metrics."""
         self._current_metadata = metadata
         self._current_image_bytes = image_bytes
+        self._current_psnr = psnr
+        self._current_ssim = ssim
+
+    def set_active_network_profile(self, profile: NetworkProfile | None):
+        """Sets active traffic shaping profile for telemetry and theoretical time calculation."""
+        self._active_profile = profile
 
     def _handle_send_single(self):
         if not self._current_metadata or not self._current_image_bytes:
@@ -210,6 +230,41 @@ class SenderTransmissionView(QWidget):
             self.card_time.set_value(f"{report.transmission_time_sec:.4f} s")
             self.card_throughput.set_value(f"{report.throughput_kbps:.2f} Kbps")
             self.card_ack.set_value("Verified (ACK_OK)")
+
+            # Record genuine experiment run in SQLite & CSV
+            if self._current_metadata is not None:
+                meta = self._current_metadata
+                ratio = (meta.original_file_size / meta.compressed_file_size) if meta.compressed_file_size > 0 else 0.0
+
+                bw_str = self._active_profile.bandwidth if self._active_profile else "unshaped"
+                loss_val = self._active_profile.loss_percent if self._active_profile else 0.0
+                delay_val = float(self._active_profile.delay_ms) if self._active_profile else 0.0
+                bw_bps = self._active_profile.bandwidth_bps if self._active_profile else 0.0
+                theo_time = compute_theoretical_transmission_time(meta.image_byte_length, bw_bps)
+
+                record = ExperimentRecord(
+                    experiment_id=meta.experiment_id,
+                    timestamp=report.timestamp,
+                    image_id=meta.image_id,
+                    compression_quality=meta.compression_quality,
+                    original_file_size=meta.original_file_size,
+                    compressed_file_size=meta.compressed_file_size,
+                    compression_ratio=ratio,
+                    psnr=self._current_psnr,
+                    ssim=self._current_ssim,
+                    bandwidth_limit=bw_str,
+                    packet_loss_rate=loss_val,
+                    network_delay_ms=delay_val,
+                    theoretical_transmission_time_sec=theo_time,
+                    transmission_time_sec=report.transmission_time_sec,
+                    measured_throughput_kbps=report.throughput_kbps,
+                    checksum_verified=report.checksum_verified,
+                    dice_coefficient=None,
+                    iou=None,
+                    notes=f"ACK Code {report.ack_status}",
+                )
+                self.results_manager.record_experiment(record)
+                self.trial_recorded.emit(record)
         else:
             self.progress_bar.setFormat("Transfer Failed")
             self.card_ack.set_value(f"Failed ({report.error_message or 'Unverified'})")

@@ -1,5 +1,6 @@
 """Sender Network Configuration View (Linux tc & netem)."""
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -13,12 +14,19 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from sender.network_control import NetworkController, PRESET_PROFILES
-from ui.shared.widgets import MetricBox, SectionHeader
+from sender.network_control import (
+    NetworkController,
+    NetworkProfile,
+    PRESET_PROFILES,
+    parse_bandwidth_to_bps,
+)
+from ui.shared.widgets import SectionHeader
 
 
 class SenderNetworkView(QWidget):
     """Controls network emulation profiles and verifies kernel qdisc status."""
+
+    profile_changed = pyqtSignal(object)  # Emits active NetworkProfile or None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,6 +84,7 @@ class SenderNetworkView(QWidget):
         # Bandwidth
         form_grid.addWidget(QLabel("Bandwidth Limit:"), 2, 0)
         self.bw_input = QComboBox()
+        self.bw_input.setEditable(True)
         self.bw_input.addItems(["10mbit", "2mbit", "512kbit", "128kbit"])
         form_grid.addWidget(self.bw_input, 2, 1)
 
@@ -83,7 +92,7 @@ class SenderNetworkView(QWidget):
         form_grid.addWidget(QLabel("Network Delay (ms):"), 3, 0)
         self.delay_spin = QSpinBox()
         self.delay_spin.setRange(0, 1000)
-        self.delay_spin.setValue(0)
+        self.delay_spin.setValue(5)
         form_grid.addWidget(self.delay_spin, 3, 1)
 
         # Packet Loss
@@ -113,30 +122,70 @@ class SenderNetworkView(QWidget):
         layout.addStretch()
 
         # Connect actions
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self.iface_combo.currentTextChanged.connect(self._on_iface_changed)
         self.apply_btn.clicked.connect(self._confirm_and_apply)
         self.reset_btn.clicked.connect(self._reset_rules)
         self.verify_btn.clicked.connect(self._refresh_status)
 
+        # Apply initial preset selection to form fields
+        self._on_preset_changed(0)
+
+    def _on_iface_changed(self, iface: str):
+        if iface:
+            self.controller.interface = iface.strip()
+            self._refresh_status()
+
+    def _on_preset_changed(self, index: int):
+        profile: NetworkProfile | None = self.preset_combo.currentData()
+        if profile is not None:
+            self.bw_input.setCurrentText(profile.bandwidth)
+            self.delay_spin.setValue(profile.delay_ms)
+            self.loss_spin.setValue(profile.loss_percent)
+
     def _confirm_and_apply(self):
+        iface = self.iface_combo.currentText()
+        bw = self.bw_input.currentText().strip()
+        delay = self.delay_spin.value()
+        loss = self.loss_spin.value()
+
+        profile = NetworkProfile(
+            name=f"{bw} (delay={delay}ms, loss={loss}%)",
+            bandwidth=bw,
+            delay_ms=delay,
+            loss_percent=loss,
+        )
+
+        confirm_msg = (
+            f"Apply the following traffic shaping rules on interface '{iface}'?\n\n"
+            f"• Bandwidth: {bw}\n"
+            f"• Added Delay: {delay} ms\n"
+            f"• Packet Loss: {loss} %\n\n"
+            "This will alter kernel network queueing (qdisc). Proceed?"
+        )
+
         reply = QMessageBox.question(
             self,
-            "Confirm Network Shaping",
-            "Applying traffic control requires root/sudo privileges and will alter network queueing on the selected interface. Proceed?",
+            "Confirm Network Configuration Change",
+            confirm_msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            # Full application in Phase 4
-            QMessageBox.information(
-                self,
-                "Traffic Shaping",
-                "tc/netem commands will be executed in Phase 4 once the VM testbed link is connected.",
-            )
+            self.controller.interface = iface
+            success, msg = self.controller.apply_profile(profile)
+            self._refresh_status()
+            if success:
+                self.profile_changed.emit(profile)
+                QMessageBox.information(self, "Traffic Shaping Active", msg)
+            else:
+                QMessageBox.warning(self, "Traffic Shaping Notice", msg)
 
     def _reset_rules(self):
         success, msg = self.controller.reset_configuration()
         self._refresh_status()
+        self.profile_changed.emit(None)
         QMessageBox.information(self, "Traffic Shaping Reset", msg)
 
     def _refresh_status(self):
-        self.kernel_status_lbl.setText(self.controller.verify_status())
-
+        status_text = self.controller.verify_status()
+        self.kernel_status_lbl.setText(status_text)

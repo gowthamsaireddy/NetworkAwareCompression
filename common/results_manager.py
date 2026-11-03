@@ -1,6 +1,7 @@
 """Experiment results manager with CSV and SQLite persistence.
 
 Follows strict Zero-Dummy-Data policy: only records genuine, measured experimental values.
+Clearly distinguishes theoretical estimates from measured transmission times.
 """
 
 import csv
@@ -23,14 +24,15 @@ class ExperimentRecord:
     compression_ratio: float
     psnr: Optional[float]  # dB or None if uncalculated
     ssim: Optional[float]  # 0..1 or None if uncalculated
-    bandwidth_limit: Optional[str]  # e.g., "10Mbps" or "unlimited"
+    bandwidth_limit: Optional[str]  # e.g., "10mbit" or "unshaped"
     packet_loss_rate: Optional[float]  # %
     network_delay_ms: Optional[float]  # ms
+    theoretical_transmission_time_sec: Optional[float]  # theoretical wire delay (s)
     transmission_time_sec: Optional[float]  # measured seconds
     measured_throughput_kbps: Optional[float]  # measured kbps
     checksum_verified: bool
-    dice_coefficient: Optional[float]  # None if no GT available
-    iou: Optional[float]  # None if no GT available
+    dice_coefficient: Optional[float] = None  # None if no GT available
+    iou: Optional[float] = None  # None if no GT available
     notes: Optional[str] = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,12 +42,11 @@ class ExperimentRecord:
 class ResultsManager:
     """Manages persistent experiment logs in CSV and SQLite formats."""
 
-    CSV_HEADER = [f.name for f in fields(ExperimentRecord)]
-
     def __init__(self, db_path: Optional[Path] = None, csv_path: Optional[Path] = None):
         EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path or (EXPERIMENTS_DIR / "experiments.sqlite")
         self.csv_path = csv_path or (EXPERIMENTS_DIR / "experiments.csv")
+        self.csv_header = [f.name for f in fields(ExperimentRecord)]
         self._init_sqlite()
         self._init_csv()
 
@@ -70,6 +71,7 @@ class ResultsManager:
                     bandwidth_limit TEXT,
                     packet_loss_rate REAL,
                     network_delay_ms REAL,
+                    theoretical_transmission_time_sec REAL,
                     transmission_time_sec REAL,
                     measured_throughput_kbps REAL,
                     checksum_verified INTEGER NOT NULL,
@@ -79,6 +81,12 @@ class ResultsManager:
                 )
                 """
             )
+            # Ensure column exists if upgraded from earlier schema
+            cursor.execute("PRAGMA table_info(experiments)")
+            existing_cols = {col[1] for col in cursor.fetchall()}
+            if "theoretical_transmission_time_sec" not in existing_cols:
+                cursor.execute("ALTER TABLE experiments ADD COLUMN theoretical_transmission_time_sec REAL")
+
             conn.commit()
         finally:
             conn.close()
@@ -88,7 +96,7 @@ class ResultsManager:
         if not self.csv_path.exists():
             with open(self.csv_path, mode="w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(self.CSV_HEADER)
+                writer.writerow(self.csv_header)
 
     def record_experiment(self, record: ExperimentRecord) -> None:
         """Persist a genuine experimental record to both SQLite and CSV."""
@@ -102,9 +110,10 @@ class ResultsManager:
                     experiment_id, timestamp, image_id, compression_quality,
                     original_file_size, compressed_file_size, compression_ratio,
                     psnr, ssim, bandwidth_limit, packet_loss_rate,
-                    network_delay_ms, transmission_time_sec, measured_throughput_kbps,
+                    network_delay_ms, theoretical_transmission_time_sec,
+                    transmission_time_sec, measured_throughput_kbps,
                     checksum_verified, dice_coefficient, iou, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.experiment_id,
@@ -119,6 +128,7 @@ class ResultsManager:
                     record.bandwidth_limit,
                     record.packet_loss_rate,
                     record.network_delay_ms,
+                    record.theoretical_transmission_time_sec,
                     record.transmission_time_sec,
                     record.measured_throughput_kbps,
                     1 if record.checksum_verified else 0,
@@ -133,7 +143,7 @@ class ResultsManager:
 
         # 2. Append to CSV
         with open(self.csv_path, mode="a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self.CSV_HEADER)
+            writer = csv.DictWriter(f, fieldnames=self.csv_header)
             writer.writerow(record.to_dict())
 
     def fetch_all(self) -> List[dict[str, Any]]:

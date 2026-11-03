@@ -118,8 +118,16 @@ class SenderMainWindow(QMainWindow):
         # 2. Dataset scan updates dashboard metrics
         self.dataset_view.dataset_scanned.connect(self._on_dataset_scanned)
 
-        # 3. Compression completion forwards payload to Transmission view
+        # 3. Compression completion forwards payload (meta, bytes, psnr, ssim) to Transmission view
         self.compression_view.compression_completed.connect(self.transmission_view.set_payload)
+
+        # 4. Network profile change updates Transmission view and Dashboard
+        self.network_view.profile_changed.connect(self.transmission_view.set_active_network_profile)
+        self.network_view.profile_changed.connect(self._on_network_profile_changed)
+
+        # 5. Recorded trials update Results view and Dashboard
+        self.transmission_view.trial_recorded.connect(self.results_view.load_records)
+        self.transmission_view.trial_recorded.connect(self._on_trial_recorded)
 
     def _on_dataset_scanned(self, total_count: int, stats: dict):
         if total_count > 0:
@@ -127,4 +135,13 @@ class SenderMainWindow(QMainWindow):
         else:
             val_text = "0 images found"
         self.dashboard_view.card_dataset.set_value(val_text)
+
+    def _on_network_profile_changed(self, profile):
+        if profile is not None:
+            self.dashboard_view.card_network.set_value(profile.name)
+        else:
+            self.dashboard_view.card_network.set_value("Unshaped (Default)")
+
+    def _on_trial_recorded(self, record):
+        self.dashboard_view.card_transfers.set_value(f"{record.image_id} (Q{record.compression_quality})")
 

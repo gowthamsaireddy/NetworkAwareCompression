@@ -36,7 +36,7 @@ from ui.shared.widgets import ImagePreviewBox, MetricBox, SectionHeader
 class SenderCompressionView(QWidget):
     """Interactive variable-rate JPEG compression and distortion evaluation."""
 
-    compression_completed = pyqtSignal(object, bytes)  # Emits (TransmissionMetadata, image_bytes)
+    compression_completed = pyqtSignal(object, bytes, float, float)  # Emits (metadata, bytes, psnr, ssim)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -227,7 +227,7 @@ class SenderCompressionView(QWidget):
                 image_byte_length=res.compressed_size_bytes,
                 sha256_checksum=sha,
             )
-            self.compression_completed.emit(metadata, res.compressed_bytes)
+            self.compression_completed.emit(metadata, res.compressed_bytes, res.psnr, res.ssim)
 
         except Exception as e:
             QMessageBox.critical(self, "Compression Error", f"Failed to compress image: {e}")
