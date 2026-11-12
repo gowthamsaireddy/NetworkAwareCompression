@@ -47,6 +47,11 @@ ACK_HEADER_SIZE = struct.calcsize(ACK_HEADER_FORMAT)  # 10 bytes
 
 CHUNK_SIZE = 65536  # 64 KB chunk size for streaming and progress updates
 
+# Security & DoS Safeguards
+MAX_METADATA_SIZE = 64 * 1024  # 64 KB maximum metadata JSON size
+MAX_IMAGE_PAYLOAD_SIZE = 50 * 1024 * 1024  # 50 MB maximum image payload size
+MAX_ACK_SIZE = 16 * 1024  # 16 KB maximum ACK JSON size
+
 
 def compute_sha256(data: bytes) -> str:
     """Compute hex SHA-256 digest for a byte sequence."""
@@ -151,6 +156,13 @@ def recv_image_frame(
     if version != PROTOCOL_VERSION:
         raise ValueError(f"Unsupported protocol version: {version} (expected {PROTOCOL_VERSION})")
 
+    # Safety bounds validation
+    if meta_len > MAX_METADATA_SIZE:
+        raise ValueError(f"Metadata length {meta_len} exceeds safety limit ({MAX_METADATA_SIZE} bytes)")
+
+    if img_len > MAX_IMAGE_PAYLOAD_SIZE:
+        raise ValueError(f"Image payload length {img_len} exceeds safety limit ({MAX_IMAGE_PAYLOAD_SIZE} bytes)")
+
     # 2. Read metadata JSON payload
     meta_bytes = recv_exact(sock, meta_len, timeout=timeout)
     try:
@@ -207,6 +219,9 @@ def recv_ack_frame(
 
     if magic != ACK_MAGIC_BYTES:
         raise ValueError(f"Invalid ACK magic: received {magic!r}, expected {ACK_MAGIC_BYTES!r}")
+
+    if ack_len > MAX_ACK_SIZE:
+        raise ValueError(f"ACK payload length {ack_len} exceeds safety limit ({MAX_ACK_SIZE} bytes)")
 
     ack_bytes = recv_exact(sock, ack_len, timeout=timeout)
     try:

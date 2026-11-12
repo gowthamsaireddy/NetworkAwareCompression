@@ -88,25 +88,127 @@ class TCPTransmissionClient:
     def is_connected(self) -> bool:
         return self.sock is not None
 
+    def set_endpoint(self, host: str, port: int) -> None:
+        """Updates target endpoint. Disconnects existing socket if endpoint changed."""
+        if self.host != host or self.port != port:
+            self.disconnect()
+            self.host = host
+            self.port = port
+            logger.info(f"Updated receiver endpoint to {self.host}:{self.port}")
+
+    def check_receiver_availability(self, timeout: float = 2.0) -> Tuple[bool, float, str]:
+        """Probes receiver TCP port and returns (is_available, rtt_ms, message)."""
+        t_start = time.perf_counter()
+        probe_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe_sock.settimeout(timeout)
+        try:
+            probe_sock.connect((self.host, self.port))
+            rtt_ms = (time.perf_counter() - t_start) * 1000.0
+            probe_sock.close()
+            return True, rtt_ms, f"Receiver active at {self.host}:{self.port} (RTT: {rtt_ms:.1f}ms)"
+        except Exception as e:
+            try:
+                probe_sock.close()
+            except Exception:
+                pass
+            return False, 0.0, f"Cannot reach receiver at {self.host}:{self.port}: {e}"
+
     def send_image(
         self,
         metadata: TransmissionMetadata,
         image_bytes: bytes,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ) -> TransmissionReport:
         """Transmits image and metadata to receiver and awaits verified acknowledgement.
 
+        Includes controlled retry mechanism for lossy or fluctuating networks.
         Strict Zero Dummy-Data policy:
         - Timing and throughput are purely based on physical clock measurements.
         - Success is never asserted without verified acknowledgment from receiver.
         """
+        last_report: Optional[TransmissionReport] = None
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Automatically connect if not already connected
-        if not self.is_connected():
-            connected, msg = self.connect()
-            if not connected:
+        for attempt in range(1, max_retries + 1):
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Automatically connect if not already connected
+            if not self.is_connected():
+                connected, msg = self.connect()
+                if not connected:
+                    last_report = TransmissionReport(
+                        image_id=metadata.image_id,
+                        bytes_sent=0,
+                        transmission_time_sec=0.0,
+                        throughput_kbps=0.0,
+                        checksum_verified=False,
+                        ack_status=-1,
+                        timestamp=now_str,
+                        error_message=f"Attempt {attempt}/{max_retries} connect failed: {msg}",
+                    )
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (1.5 ** (attempt - 1)))
+                        continue
+                    self.transfer_history.append(last_report)
+                    return last_report
+
+            assert self.sock is not None
+
+            try:
+                # Measure actual elapsed transmission duration
+                t_start = time.perf_counter()
+
+                # Transmit binary frame over TCP
+                send_image_frame(
+                    self.sock,
+                    metadata,
+                    image_bytes,
+                    progress_callback=progress_callback,
+                    timeout=self.timeout,
+                )
+
+                # Await receiver acknowledgment confirming byte count & SHA-256
+                ack = recv_ack_frame(self.sock, timeout=self.timeout)
+                t_end = time.perf_counter()
+
+                # Physical measurements
+                elapsed_sec = max(t_end - t_start, 1e-6)
+                total_bytes = IMAGE_HEADER_SIZE + len(metadata.to_json().encode("utf-8")) + len(image_bytes)
+                throughput_kbps = (total_bytes * 8.0) / (elapsed_sec * 1000.0)
+
                 report = TransmissionReport(
+                    image_id=metadata.image_id,
+                    bytes_sent=total_bytes,
+                    transmission_time_sec=elapsed_sec,
+                    throughput_kbps=throughput_kbps,
+                    checksum_verified=ack.sha256_verified,
+                    ack_status=ack.status_code,
+                    timestamp=now_str,
+                    error_message=ack.error_message,
+                )
+
+                if report.is_success:
+                    logger.info(
+                        f"Transfer succeeded for {metadata.image_id}: {total_bytes} bytes in {elapsed_sec:.4f}s "
+                        f"({throughput_kbps:.2f} Kbps). Checksum verified."
+                    )
+                    self.transfer_history.append(report)
+                    return report
+                else:
+                    logger.warning(
+                        f"Transfer rejected on attempt {attempt}/{max_retries} for {metadata.image_id}: ACK={ack.status_code}, err={ack.error_message}"
+                    )
+                    last_report = report
+                    # If checksum mismatch or corrupt payload, retry
+                    self.disconnect()
+
+            except (socket.timeout, TimeoutError) as e:
+                err = f"Transfer timed out (attempt {attempt}/{max_retries}): {e}"
+                logger.error(err)
+                self.disconnect()
+                last_report = TransmissionReport(
                     image_id=metadata.image_id,
                     bytes_sent=0,
                     transmission_time_sec=0.0,
@@ -114,106 +216,42 @@ class TCPTransmissionClient:
                     checksum_verified=False,
                     ack_status=-1,
                     timestamp=now_str,
-                    error_message=msg,
-                )
-                self.transfer_history.append(report)
-                return report
-
-        assert self.sock is not None
-
-        try:
-            # Measure actual elapsed transmission duration
-            t_start = time.perf_counter()
-
-            # Transmit binary frame over TCP
-            send_image_frame(
-                self.sock,
-                metadata,
-                image_bytes,
-                progress_callback=progress_callback,
-                timeout=self.timeout,
-            )
-
-            # Await receiver acknowledgment confirming byte count & SHA-256
-            ack = recv_ack_frame(self.sock, timeout=self.timeout)
-            t_end = time.perf_counter()
-
-            # Physical measurements
-            elapsed_sec = max(t_end - t_start, 1e-6)
-            total_bytes = IMAGE_HEADER_SIZE + len(metadata.to_json().encode("utf-8")) + len(image_bytes)
-            throughput_kbps = (total_bytes * 8.0) / (elapsed_sec * 1000.0)
-
-            report = TransmissionReport(
-                image_id=metadata.image_id,
-                bytes_sent=total_bytes,
-                transmission_time_sec=elapsed_sec,
-                throughput_kbps=throughput_kbps,
-                checksum_verified=ack.sha256_verified,
-                ack_status=ack.status_code,
-                timestamp=now_str,
-                error_message=ack.error_message,
-            )
-            self.transfer_history.append(report)
-
-            if report.is_success:
-                logger.info(
-                    f"Transfer succeeded for {metadata.image_id}: {total_bytes} bytes in {elapsed_sec:.4f}s "
-                    f"({throughput_kbps:.2f} Kbps). Checksum verified."
-                )
-            else:
-                logger.warning(
-                    f"Transfer rejected or unverified for {metadata.image_id}: ACK code={ack.status_code}, error={ack.error_message}"
+                    error_message=err,
                 )
 
-            return report
+            except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
+                err = f"Connection broken during transfer (attempt {attempt}/{max_retries}): {e}"
+                logger.error(err)
+                self.disconnect()
+                last_report = TransmissionReport(
+                    image_id=metadata.image_id,
+                    bytes_sent=0,
+                    transmission_time_sec=0.0,
+                    throughput_kbps=0.0,
+                    checksum_verified=False,
+                    ack_status=-1,
+                    timestamp=now_str,
+                    error_message=err,
+                )
 
-        except (socket.timeout, TimeoutError) as e:
-            err = f"Transfer timed out: {e}"
-            logger.error(err)
-            self.disconnect()
-            report = TransmissionReport(
-                image_id=metadata.image_id,
-                bytes_sent=0,
-                transmission_time_sec=0.0,
-                throughput_kbps=0.0,
-                checksum_verified=False,
-                ack_status=-1,
-                timestamp=now_str,
-                error_message=err,
-            )
-            self.transfer_history.append(report)
-            return report
+            except Exception as e:
+                err = f"Unexpected transmission failure (attempt {attempt}/{max_retries}): {e}"
+                logger.error(err)
+                self.disconnect()
+                last_report = TransmissionReport(
+                    image_id=metadata.image_id,
+                    bytes_sent=0,
+                    transmission_time_sec=0.0,
+                    throughput_kbps=0.0,
+                    checksum_verified=False,
+                    ack_status=-1,
+                    timestamp=now_str,
+                    error_message=err,
+                )
 
-        except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-            err = f"Connection broken during transfer: {e}"
-            logger.error(err)
-            self.disconnect()
-            report = TransmissionReport(
-                image_id=metadata.image_id,
-                bytes_sent=0,
-                transmission_time_sec=0.0,
-                throughput_kbps=0.0,
-                checksum_verified=False,
-                ack_status=-1,
-                timestamp=now_str,
-                error_message=err,
-            )
-            self.transfer_history.append(report)
-            return report
+            if attempt < max_retries:
+                time.sleep(retry_delay * (1.5 ** (attempt - 1)))
 
-        except Exception as e:
-            err = f"Unexpected transmission failure: {e}"
-            logger.error(err)
-            self.disconnect()
-            report = TransmissionReport(
-                image_id=metadata.image_id,
-                bytes_sent=0,
-                transmission_time_sec=0.0,
-                throughput_kbps=0.0,
-                checksum_verified=False,
-                ack_status=-1,
-                timestamp=now_str,
-                error_message=err,
-            )
-            self.transfer_history.append(report)
-            return report
+        assert last_report is not None
+        self.transfer_history.append(last_report)
+        return last_report

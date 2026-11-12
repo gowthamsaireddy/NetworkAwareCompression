@@ -1,5 +1,7 @@
 """Receiver Application Main Window with Sidebar Navigation."""
 
+from datetime import datetime
+from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -7,10 +9,13 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+from common.config import get_receiver_config
+from common.results_manager import ExperimentRecord, ResultsManager
 from receiver.model_manager import ModelManager
 from ui.receiver.dashboard_view import ReceiverDashboardView
 from ui.receiver.evaluation_view import ReceiverEvaluationView
@@ -31,8 +36,14 @@ class ReceiverMainWindow(QMainWindow):
         self.resize(1200, 800)
         self.setMinimumSize(980, 640)
         self.setStyleSheet(APP_STYLESHEET)
-        self.model_manager = ModelManager()
+
+        self.config = get_receiver_config()
+        self.auto_process_enabled = self.config.auto_process_enabled
+        self.model_manager = ModelManager(device=self.config.device if self.config.device != "auto" else None)
+        self.results_manager = ResultsManager()
+
         self.init_ui()
+        self._auto_load_default_checkpoint()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -89,7 +100,13 @@ class ReceiverMainWindow(QMainWindow):
 
         # Initialize view panels with shared model manager
         self.dashboard_view = ReceiverDashboardView()
+        self.dashboard_view.auto_process_chk.setChecked(self.auto_process_enabled)
+        self.dashboard_view.card_device.set_value(str(self.model_manager.device).upper())
+
         self.tcp_view = ReceiverTCPView()
+        self.tcp_view.bind_ip_input.setText(self.config.listen_ip)
+        self.tcp_view.bind_port_input.setValue(self.config.listen_port)
+
         self.image_view = ReceiverImageView()
         self.model_view = ReceiverModelView(self.model_manager)
         self.segmentation_view = ReceiverSegmentationView(self.model_manager)
@@ -107,16 +124,35 @@ class ReceiverMainWindow(QMainWindow):
         main_layout.addWidget(self.stack, stretch=1)
 
         # Connect navigation
-        self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav_list.currentRowChanged.connect(self._on_navigation_changed)
         self.nav_list.setCurrentRow(0)
 
         # Wire cross-view dataflow
         self._connect_receiver_signals()
 
+        # Index existing received images from disk storage
+        existing_count = self.image_view.load_existing_received_images()
+        if existing_count > 0:
+            self.dashboard_view.card_received.set_value(str(existing_count))
+        self.dashboard_view.update_storage()
+
+    def _auto_load_default_checkpoint(self):
+        """Attempts to auto-load default model checkpoint on launch if present."""
+        chk_path = Path(self.config.model_checkpoint_path)
+        if chk_path.exists():
+            success, msg = self.model_manager.load_checkpoint(chk_path)
+            if success:
+                self.model_view.path_input.setText(str(chk_path))
+                self.model_view.card_status.set_value(self.model_manager.get_status())
+                self.dashboard_view.card_model.set_value(chk_path.name)
+                self.dashboard_view.card_device.set_value(str(self.model_manager.device).upper())
+
     def _connect_receiver_signals(self):
         # 1. Forward received verified images to ImageView and update Dashboard
         self.tcp_view.bridge.image_received.connect(self._on_image_received)
         self.tcp_view.bridge.status_changed.connect(self._on_server_status_changed)
+        self.tcp_view.bridge.client_connected.connect(self._on_client_connected)
+        self.tcp_view.bridge.client_disconnected.connect(self._on_client_disconnected)
 
         # 2. Model loaded updates dashboard card
         self.model_view.model_loaded.connect(self._on_model_loaded)
@@ -127,14 +163,88 @@ class ReceiverMainWindow(QMainWindow):
         # 4. Completed segmentation forwards directly to evaluation view
         self.segmentation_view.segmentation_completed.connect(self._on_segmentation_completed)
 
-        # 5. Evaluation completion updates dashboard metrics
+        # 5. Batch segmentation requested
+        self.segmentation_view.run_batch_btn.clicked.connect(self._on_batch_segmentation_requested)
+
+        # 6. Evaluation completion updates dashboard metrics and results table
         self.evaluation_view.evaluation_completed.connect(self._on_evaluation_completed)
 
+        # 7. Auto process toggle
+        self.dashboard_view.auto_process_toggled.connect(self._on_auto_process_toggled)
+
+    def _on_navigation_changed(self, index: int):
+        self.stack.setCurrentIndex(index)
+        if index == 6:  # Experiment Results tab
+            self.results_view.load_records()
+        elif index == 0:  # Dashboard tab
+            self.dashboard_view.card_received.set_value(str(len(self.image_view.received_items)))
+            self.dashboard_view.update_storage()
+
+    def _on_auto_process_toggled(self, enabled: bool):
+        self.auto_process_enabled = enabled
+        mode_text = "Mode: Automatic Segmentation" if enabled else "Mode: Manual Segmentation Only"
+        self.dashboard_view.pipeline_badge.setText(mode_text)
+        color = "#10b981" if enabled else "#f59e0b"
+        self.dashboard_view.pipeline_badge.setStyleSheet(f"color: {color}; font-weight: 600; font-size: 11px;")
+
+    def _on_client_connected(self, client_addr: str):
+        self.dashboard_view.card_client.set_value(client_addr)
+
+    def _on_client_disconnected(self, client_addr: str):
+        self.dashboard_view.card_client.set_value("Disconnected")
+
     def _on_image_received(self, metadata, image_bytes, verified, save_path, timestamp):
+        # Update dashboard telemetry
+        self.dashboard_view.card_exp_id.set_value(metadata.experiment_id)
+        chk_status = "Verified (SHA-256 Match)" if verified else "Failed (Checksum Mismatch)"
+        self.dashboard_view.card_checksum.set_value(chk_status)
+
         if verified and save_path is not None:
             self.image_view.add_received_image(metadata, save_path)
             total_count = len(self.image_view.received_items)
             self.dashboard_view.card_received.set_value(str(total_count))
+            self.dashboard_view.update_storage()
+
+            # Record reception in ResultsManager
+            ratio = (
+                (metadata.original_file_size / metadata.compressed_file_size)
+                if metadata.compressed_file_size > 0
+                else 1.0
+            )
+            rec = ExperimentRecord(
+                experiment_id=metadata.experiment_id,
+                timestamp=timestamp,
+                image_id=metadata.image_id,
+                compression_quality=metadata.compression_quality,
+                original_file_size=metadata.original_file_size,
+                compressed_file_size=metadata.compressed_file_size,
+                compression_ratio=ratio,
+                psnr=None,
+                ssim=None,
+                bandwidth_limit="unshaped",
+                packet_loss_rate=0.0,
+                network_delay_ms=0.0,
+                theoretical_transmission_time_sec=None,
+                transmission_time_sec=None,
+                measured_throughput_kbps=None,
+                checksum_verified=verified,
+                dice_coefficient=None,
+                iou=None,
+                notes="Received via TCP",
+            )
+            self.results_manager.record_or_update_experiment(rec)
+            self.results_view.load_records()
+
+            # Automatic Processing Pipeline (if enabled and model is mounted)
+            if self.auto_process_enabled and self.model_manager.is_loaded and self.model_manager.model is not None:
+                success, result, msg = self.segmentation_view.engine.run_inference(save_path, metadata.image_id)
+                if success and result is not None:
+                    self.segmentation_view.current_result = result
+                    self.evaluation_view.load_evaluation_data(
+                        result,
+                        metadata,
+                        comp_image_path=save_path,
+                    )
 
     def _on_server_status_changed(self, is_running, message):
         status_text = f"Listening ({self.tcp_view.server.port})" if is_running else "Stopped"
@@ -142,6 +252,7 @@ class ReceiverMainWindow(QMainWindow):
 
     def _on_model_loaded(self, status_desc: str):
         self.dashboard_view.card_model.set_value(status_desc)
+        self.dashboard_view.card_device.set_value(self.model_manager.device.upper())
 
     def _on_image_selected_for_pipeline(self, metadata, save_path):
         self.segmentation_view.set_active_image(save_path, metadata)
@@ -153,9 +264,66 @@ class ReceiverMainWindow(QMainWindow):
             comp_image_path=self.segmentation_view.current_image_path,
         )
 
-    def _on_evaluation_completed(self, metadata, dice, iou):
+    def _on_batch_segmentation_requested(self):
+        if not self.image_view.received_items:
+            QMessageBox.information(self, "No Images", "No received images available to segment.")
+            return
+
+        if not self.model_manager.is_loaded or self.model_manager.model is None:
+            QMessageBox.warning(
+                self,
+                "No Model Loaded",
+                "Please load a pre-trained frozen U-Net model from the Model Management tab first.",
+            )
+            return
+
+        processed = 0
+        for metadata, save_path in self.image_view.received_items:
+            success, result, msg = self.segmentation_view.engine.run_inference(save_path, metadata.image_id)
+            if success and result is not None:
+                self.evaluation_view.load_evaluation_data(result, metadata, comp_image_path=save_path)
+                processed += 1
+
+        QMessageBox.information(
+            self,
+            "Batch Complete",
+            f"Successfully segmented and evaluated {processed} received images.\nCheck Experiment Results for complete records.",
+        )
+
+    def _on_evaluation_completed(self, metadata, dice, iou, psnr=None, ssim=None):
         if dice is not None and iou is not None:
             self.dashboard_view.card_eval.set_value(f"Dice: {dice:.4f} | IoU: {iou:.4f}")
         else:
             self.dashboard_view.card_eval.set_value("No GT Mask Found")
 
+        if metadata is not None:
+            ratio = (
+                (metadata.original_file_size / metadata.compressed_file_size)
+                if metadata.compressed_file_size > 0
+                else 1.0
+            )
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            rec = ExperimentRecord(
+                experiment_id=metadata.experiment_id,
+                timestamp=now_str,
+                image_id=metadata.image_id,
+                compression_quality=metadata.compression_quality,
+                original_file_size=metadata.original_file_size,
+                compressed_file_size=metadata.compressed_file_size,
+                compression_ratio=ratio,
+                psnr=psnr,
+                ssim=ssim,
+                bandwidth_limit="unshaped",
+                packet_loss_rate=0.0,
+                network_delay_ms=0.0,
+                theoretical_transmission_time_sec=None,
+                transmission_time_sec=None,
+                measured_throughput_kbps=None,
+                checksum_verified=True,
+                dice_coefficient=dice,
+                iou=iou,
+                notes="Receiver evaluated",
+            )
+            self.results_manager.record_or_update_experiment(rec)
+            self.results_view.load_records()

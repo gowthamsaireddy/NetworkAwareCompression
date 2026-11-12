@@ -1,9 +1,14 @@
 """Receiver-side image storage and retrieval."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+import re
+import shutil
+from typing import List, Optional, Union
 from shared.metadata import TransmissionMetadata
+
+MIN_FREE_DISK_BYTES = 50 * 1024 * 1024  # 50 MB safety margin
 
 
 @dataclass
@@ -19,8 +24,8 @@ class ReceivedImageItem:
 class ImageReceiverManager:
     """Manages storage and indexing of received compressed images."""
 
-    def __init__(self, storage_dir: Path):
-        self.storage_dir = storage_dir
+    def __init__(self, storage_dir: Union[Path, str]):
+        self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.received_items: List[ReceivedImageItem] = []
 
@@ -28,12 +33,32 @@ class ImageReceiverManager:
         self,
         metadata: TransmissionMetadata,
         image_bytes: bytes,
-        timestamp: str,
+        timestamp: Optional[str] = None,
     ) -> Path:
-        """Saves verified image binary to disk with deterministic naming."""
-        safe_img_id = metadata.image_id.replace("/", "_").replace("\\", "_")
-        filename = f"{safe_img_id}_Q{metadata.compression_quality}_{metadata.experiment_id}.jpg"
-        target_path = self.storage_dir / filename
+        """Saves verified image binary to disk with deterministic naming and security validation."""
+        if not timestamp:
+            timestamp = datetime.now().isoformat()
+
+        # Check storage space
+        try:
+            free_bytes = shutil.disk_usage(self.storage_dir).free
+            if free_bytes < (len(image_bytes) + MIN_FREE_DISK_BYTES):
+                raise OSError(f"Insufficient disk space ({free_bytes // (1024*1024)} MB available).")
+        except Exception as e:
+            if isinstance(e, OSError):
+                raise
+
+        # Sanitize filenames to prevent path traversal
+        clean_img_id = metadata.image_id.replace("..", "_").replace("/", "_").replace("\\", "_")
+        safe_img_id = re.sub(r"[^\w\s\(\)\.-]", "_", clean_img_id).strip()
+        clean_exp_id = metadata.experiment_id.replace("..", "_").replace("/", "_").replace("\\", "_")
+        safe_exp_id = re.sub(r"[^\w\.-]", "_", clean_exp_id).strip()
+        filename = f"{safe_img_id}_Q{metadata.compression_quality}_{safe_exp_id}.jpg"
+
+        target_path = (self.storage_dir / filename).resolve()
+        storage_resolved = self.storage_dir.resolve()
+        if not str(target_path).startswith(str(storage_resolved)):
+            raise ValueError(f"Path traversal detected: {metadata.image_id}")
 
         with open(target_path, "wb") as f:
             f.write(image_bytes)

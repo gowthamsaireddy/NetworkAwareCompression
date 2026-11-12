@@ -161,3 +161,98 @@ class ExperimentOrchestrator:
             adaptive_decision=decision,
             progress_callback=progress_callback,
         )
+
+    def run_batch_experiment(
+        self,
+        items: List[DatasetItem],
+        quality_strategy: str = "fixed",  # "fixed" or "adaptive"
+        fixed_qualities: Optional[List[int]] = None,
+        profiles: Optional[List[Optional[NetworkProfile]]] = None,
+        progress_callback: Optional[Callable[[int, int, str, Optional[ExperimentRecord]], None]] = None,
+        stop_requested: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[int, int, List[ExperimentRecord], str]:
+        """Executes automated multi-image experimental runs with progress tracking and interruption safety.
+
+        Guarantees:
+        - Prevents duplicate experiment IDs by using atomic timestamps.
+        - Preserves previous historical records (append/update policy).
+        - Automatically restores network settings to unshaped upon completion or abort.
+        """
+        qualities = fixed_qualities or [70]
+        net_profiles = profiles if profiles is not None else [None]
+
+        # Calculate total trials
+        trials_per_item = len(qualities) if quality_strategy == "fixed" else 1
+        total_trials = len(items) * len(net_profiles) * trials_per_item
+
+        completed = 0
+        failed = 0
+        records: List[ExperimentRecord] = []
+        current_step = 0
+
+        logger.info(
+            f"Starting batch experiment: {len(items)} items, strategy='{quality_strategy}', "
+            f"{len(net_profiles)} profile(s), {total_trials} total scheduled trials."
+        )
+
+        try:
+            for prof in net_profiles:
+                if stop_requested and stop_requested():
+                    break
+
+                # Apply network traffic shaping profile if specified
+                if prof:
+                    self.network_controller.apply_profile(prof)
+                else:
+                    self.network_controller.reset()
+
+                for item_idx, item in enumerate(items):
+                    if stop_requested and stop_requested():
+                        break
+
+                    if quality_strategy == "fixed":
+                        for q in qualities:
+                            if stop_requested and stop_requested():
+                                break
+
+                            current_step += 1
+                            step_desc = f"[{current_step}/{total_trials}] {item.image_id} (Q{q})"
+                            success, rec, msg = self.run_single_trial(
+                                item=item,
+                                quality=q,
+                                profile=prof,
+                                experiment_id_prefix="EXP",
+                            )
+                            if success and rec:
+                                completed += 1
+                                records.append(rec)
+                            else:
+                                failed += 1
+
+                            if progress_callback:
+                                progress_callback(current_step, total_trials, step_desc, rec)
+
+                    else:  # Adaptive Mode
+                        current_step += 1
+                        step_desc = f"[{current_step}/{total_trials}] {item.image_id} (Adaptive)"
+                        success, rec, msg = self.run_adaptive_trial(
+                            item=item,
+                            profile=prof,
+                            use_ewma=True,
+                        )
+                        if success and rec:
+                            completed += 1
+                            records.append(rec)
+                        else:
+                            failed += 1
+
+                        if progress_callback:
+                            progress_callback(current_step, total_trials, step_desc, rec)
+
+        finally:
+            # Ensure network is reset back to unshaped state
+            self.network_controller.reset()
+
+        summary = f"Batch finished: {completed} succeeded, {failed} failed out of {current_step} attempted."
+        logger.info(summary)
+        return completed, failed, records, summary

@@ -19,11 +19,14 @@ logger = setup_logger("ModelManager")
 class ModelManager:
     """Manages pre-trained deep learning checkpoints in frozen evaluation mode."""
 
-    def __init__(self):
+    def __init__(self, device: Optional[Union[torch.device, str]] = None):
         self.model: Optional[nn.Module] = None
         self.checkpoint_path: Optional[Path] = None
         self.model_name: str = "None"
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is not None:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.is_loaded: bool = False
         self._model_factory: Optional[Callable[[], nn.Module]] = None
 
@@ -85,8 +88,17 @@ class ModelManager:
                 # Checkpoint is a state_dict or training dict containing 'model_state_dict' / 'state_dict'
                 state_dict = loaded_obj.get("state_dict") or loaded_obj.get("model_state_dict") or loaded_obj
 
+                instance = None
                 if self._model_factory is not None:
                     instance = self._model_factory()
+                else:
+                    try:
+                        from models.unet import UNet
+                        instance = UNet()
+                    except Exception:
+                        instance = None
+
+                if instance is not None:
                     instance.load_state_dict(state_dict)
                     self.model = instance.to(self.device)
                 else:

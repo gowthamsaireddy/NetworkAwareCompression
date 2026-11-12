@@ -1,7 +1,9 @@
 """Receiver Image Viewer & Inspection View."""
 
 from pathlib import Path
+import re
 from typing import List, Optional, Tuple
+from PIL import Image
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
@@ -17,8 +19,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from shared.constants import STATUS_NO_DATA
+from common.config import DATA_DIR
+from shared.constants import PROTOCOL_VERSION, STATUS_NO_DATA
 from shared.metadata import TransmissionMetadata
+from shared.protocol import compute_sha256
 from ui.shared.widgets import ImagePreviewBox, MetricBox, SectionHeader
 
 
@@ -105,6 +109,72 @@ class ReceiverImageView(QWidget):
 
         # Select the newly added row
         self.table.selectRow(row)
+
+    def load_existing_received_images(self, search_dir: Optional[Path] = None) -> int:
+        """Scans disk storage for existing received images and indexes them."""
+        target_dir = search_dir or (DATA_DIR / "received")
+        if not target_dir.exists():
+            return 0
+
+        loaded_count = 0
+        pattern = re.compile(r"^(.*)_Q(\d+)_(.*)\.jpg$")
+
+        for img_path in sorted(target_dir.glob("*.jpg"), key=lambda p: p.stat().st_mtime):
+            # Prevent duplicate indexing
+            if any(path == img_path for _, path in self.received_items):
+                continue
+
+            match = pattern.match(img_path.name)
+            if not match:
+                continue
+
+            safe_img_id, q_str, exp_id = match.groups()
+            quality = int(q_str)
+
+            # Restore original image_id category/name structure
+            image_id = safe_img_id
+            for prefix in ("benign_", "malignant_", "normal_"):
+                if safe_img_id.startswith(prefix):
+                    cat = prefix[:-1]
+                    name = safe_img_id[len(prefix):]
+                    image_id = f"{cat}/{name}"
+                    break
+
+            try:
+                raw_bytes = img_path.read_bytes()
+                comp_size = len(raw_bytes)
+                sha = compute_sha256(raw_bytes)
+
+                with Image.open(img_path) as pil_img:
+                    w, h = pil_img.size
+
+                # Attempt to determine original file size if source exists
+                orig_size = comp_size
+                for cand in (DATA_DIR / "BUSI").rglob("*.png"):
+                    if "_mask" not in cand.name and Path(image_id).stem in cand.name:
+                        orig_size = cand.stat().st_size
+                        break
+
+                meta = TransmissionMetadata(
+                    protocol_version=PROTOCOL_VERSION,
+                    experiment_id=exp_id,
+                    image_id=image_id,
+                    compression_quality=quality,
+                    image_width=w,
+                    image_height=h,
+                    image_format="JPEG",
+                    original_file_size=orig_size,
+                    compressed_file_size=comp_size,
+                    image_byte_length=comp_size,
+                    sha256_checksum=sha,
+                )
+
+                self.add_received_image(meta, img_path)
+                loaded_count += 1
+            except Exception:
+                continue
+
+        return loaded_count
 
     def _on_table_selection(self):
         selected_rows = self.table.selectionModel().selectedRows()

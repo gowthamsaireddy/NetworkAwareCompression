@@ -115,22 +115,28 @@ class SenderMainWindow(QMainWindow):
         self._connect_view_signals()
 
     def _connect_view_signals(self):
-        # 1. Dataset selection forwards to Compression view and Adaptive view
+        # 1. Dataset selection forwards to Compression view, Adaptive view, and Dashboard
         self.dataset_view.image_selected.connect(self.compression_view.load_dataset_item)
         self.dataset_view.image_selected.connect(self.adaptive_view.set_dataset_item)
+        self.dataset_view.image_selected.connect(self._on_image_selected)
 
-        # 2. Dataset scan updates dashboard metrics
+        # 2. Dataset scan updates dashboard metrics & transmission batch cache
         self.dataset_view.dataset_scanned.connect(self._on_dataset_scanned)
 
-        # 3. Compression completion forwards payload (meta, bytes, psnr, ssim) to Transmission view
+        # 3. Compression completion forwards payload to Transmission view & Dashboard
         self.compression_view.compression_completed.connect(self.transmission_view.set_payload)
+        self.compression_view.compression_completed.connect(self._on_compression_completed)
 
         # 4. Network profile change updates Transmission view, Adaptive view, and Dashboard
         self.network_view.profile_changed.connect(self.transmission_view.set_active_network_profile)
         self.network_view.profile_changed.connect(self.adaptive_view.set_active_network_profile)
         self.network_view.profile_changed.connect(self._on_network_profile_changed)
 
-        # 5. Recorded trials update Results view, Dashboard, and Adaptive EWMA
+        # 5. Connection state sync
+        self.transmission_view.connection_changed.connect(self.dashboard_view.update_connection_state)
+        self.dashboard_view.test_connection_requested.connect(self.transmission_view._handle_probe)
+
+        # 6. Recorded trials update Results view, Dashboard, and Adaptive EWMA
         self.transmission_view.trial_recorded.connect(self.results_view.load_records)
         self.transmission_view.trial_recorded.connect(self._on_trial_recorded)
         self.transmission_view.trial_recorded.connect(self._on_transmission_trial_recorded)
@@ -138,21 +144,39 @@ class SenderMainWindow(QMainWindow):
         self.adaptive_view.trial_recorded.connect(self.results_view.load_records)
         self.adaptive_view.trial_recorded.connect(self._on_trial_recorded)
 
+    def _on_image_selected(self, item):
+        if item is not None:
+            self.dashboard_view.card_image.set_value(item.image_id)
+            self.dashboard_view.card_orig_size.set_value(f"{item.file_size_bytes:,} B")
+
+    def _on_compression_completed(self, metadata, comp_bytes, psnr, ssim):
+        self.dashboard_view.card_quality.set_value(f"Q{metadata.compression_quality}")
+        self.dashboard_view.card_comp_size.set_value(f"{metadata.compressed_file_size:,} B")
+        ratio = (metadata.original_file_size / metadata.compressed_file_size) if metadata.compressed_file_size > 0 else 1.0
+        self.dashboard_view.card_ratio.set_value(f"{ratio:.2f}:1")
+        psnr_str = f"{psnr:.2f} dB" if psnr is not None else "-"
+        ssim_str = f"{ssim:.4f}" if ssim is not None else "-"
+        self.dashboard_view.card_psnr_ssim.set_value(f"{psnr_str} | {ssim_str}")
+
     def _on_dataset_scanned(self, total_count: int, stats: dict):
-        if total_count > 0:
-            val_text = f"{total_count} ({stats.get('benign',0)}B, {stats.get('malignant',0)}M, {stats.get('normal',0)}N)"
-        else:
-            val_text = "0 images found"
-        self.dashboard_view.card_dataset.set_value(val_text)
+        self.transmission_view.set_dataset_items(self.dataset_view.dataset_manager.items)
+        self.dashboard_view.card_scanned.set_value(str(total_count))
 
     def _on_network_profile_changed(self, profile):
         if profile is not None:
-            self.dashboard_view.card_network.set_value(profile.name)
+            self.dashboard_view.card_profile.set_value(f"{profile.name} ({profile.bandwidth})")
         else:
-            self.dashboard_view.card_network.set_value("Unshaped (Default)")
+            self.dashboard_view.card_profile.set_value("Unshaped (Direct)")
 
     def _on_trial_recorded(self, record):
-        self.dashboard_view.card_transfers.set_value(f"{record.image_id} (Q{record.compression_quality})")
+        if record.transmission_time_sec is not None:
+            self.dashboard_view.card_wire_time.set_value(f"{record.transmission_time_sec:.4f} s")
+        if record.measured_throughput_kbps is not None:
+            self.dashboard_view.card_throughput.set_value(f"{record.measured_throughput_kbps:,.2f} Kbps")
+        ack_val = "Verified (ACK_OK)" if record.checksum_verified else "Failed"
+        self.dashboard_view.card_ack.set_value(ack_val)
+        self.dashboard_view.progress_bar.setValue(100)
+        self.dashboard_view.progress_bar.setFormat(f"Transfer Done ({record.image_id})")
 
     def _on_transmission_trial_recorded(self, record):
         if record.measured_throughput_kbps and record.measured_throughput_kbps > 0:

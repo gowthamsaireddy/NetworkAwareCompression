@@ -116,6 +116,38 @@ class TestDatasetManager(unittest.TestCase):
         self.assertEqual(len(loaded), 3)
         self.assertEqual(fresh_dm.get_item_by_id("benign/benign (1)").width, 256)
 
+    def test_stratified_splits(self):
+        # Create larger test set to allow stratification
+        for cat, count in [("benign", 20), ("malignant", 10), ("normal", 10)]:
+            cat_dir = self.root_path / cat
+            for i in range(2, count + 1):
+                img = Image.new("L", (128, 128), color=100)
+                img.save(cat_dir / f"{cat} ({i}).png")
+
+        self.dm.scan_dataset()
+        self.assertEqual(len(self.dm.items), 40)
+
+        split_path = self.root_path / "splits.json"
+        splits = self.dm.create_stratified_splits(
+            train_ratio=0.70, val_ratio=0.15, test_ratio=0.15, random_seed=42, output_path=split_path
+        )
+        self.assertTrue(split_path.exists())
+
+        train_ids = {item["image_id"] for item in splits["train"]}
+        val_ids = {item["image_id"] for item in splits["validation"]}
+        test_ids = {item["image_id"] for item in splits["test"]}
+
+        # No leakage
+        self.assertEqual(len(train_ids & val_ids), 0)
+        self.assertEqual(len(train_ids & test_ids), 0)
+        self.assertEqual(len(val_ids & test_ids), 0)
+        self.assertEqual(len(train_ids | val_ids | test_ids), 40)
+
+        # Proportions: 70% of 40 = 28, 15% of 40 = 6, 15% of 40 = 6
+        self.assertEqual(len(splits["train"]), 28)
+        self.assertEqual(len(splits["validation"]), 6)
+        self.assertEqual(len(splits["test"]), 6)
+
 
 class TestJPEGCompression(unittest.TestCase):
     """Tests variable rate JPEG compression, dimension preservation, and mask protection."""

@@ -8,8 +8,8 @@ This guide details the physical deployment, network configuration, and environme
 
 | Node | Physical Machine | Operating System | Role |
 | :--- | :--- | :--- | :--- |
-| **Sender** | Laptop 1 | Windows Host running **Ubuntu Linux VM** | Dataset scanning, JPEG compression, Linux `tc`/`netem` traffic shaping, adaptive control, TCP client |
-| **Receiver** | Laptop 2 | **Windows 11 Native Host** | TCP server daemon, SHA-256 verification, frozen U-Net inference ($256 \times 256$), Dice/IoU evaluation |
+| **Sender** | Laptop 1 | Windows Host running **Ubuntu Linux VM** (or Native Ubuntu) | Dataset scanning, JPEG compression, Linux `tc`/`netem` traffic shaping, adaptive control, TCP client |
+| **Receiver** | Laptop 2 | **Windows 10 / Windows 11 Native Host** | TCP server daemon, SHA-256 verification, automatic frozen U-Net inference ($256 \times 256$), Dice/IoU evaluation |
 
 ---
 
@@ -37,12 +37,12 @@ To allow the Ubuntu VM to directly control and shape the physical Ethernet link:
    sudo ip link set eth0 up
    ```
 
-### Verification
+### Link Verification
 From Ubuntu VM, ping the Windows 11 host:
 ```bash
-ping 192.168.10.2
+ping -c 4 192.168.10.2
 ```
-From Windows 11 Command Prompt, ping the Ubuntu VM:
+From Windows 11 Command Prompt or PowerShell, ping the Ubuntu VM:
 ```cmd
 ping 192.168.10.1
 ```
@@ -57,7 +57,7 @@ Linux kernel traffic control (`tc`) and network emulation (`netem`) require root
    ```bash
    sudo visudo
    ```
-2. Append the following rule at the end of the file (replace `ubuntu` with your username):
+2. Append the following rule at the end of the file (replace `ubuntu` with your Linux username):
    ```text
    ubuntu ALL=(ALL) NOPASSWD: /sbin/tc, /usr/sbin/tc
    ```
@@ -65,62 +65,92 @@ Linux kernel traffic control (`tc`) and network emulation (`netem`) require root
 
 ---
 
-## 4. Software Installation & Virtual Environments
+## 4. One-Click Setup & Launch Scripts
 
-### Laptop 1 (Ubuntu Sender VM)
+### Laptop 1 (Ubuntu Sender)
+
 ```bash
-# Update package index and install system packages
-sudo apt update
-sudo apt install -y python3 python3-pip python3-venv iproute2 libgl1-mesa-glx
+# 1. Run automated setup script
+chmod +x setup_ubuntu.sh run_sender.sh
+./setup_ubuntu.sh
 
-# Clone repository
-git clone https://github.com/gowthamsaireddy/NetworkAwareCompression.git
-cd NetworkAwareCompression
+# 2. Verify config.json has the Windows Receiver IP:
+# "receiver_ip": "192.168.10.2"
 
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install sender dependencies
-pip install --upgrade pip
-pip install -r requirements/sender.txt
+# 3. Launch Sender GUI
+./run_sender.sh
 ```
 
 ### Laptop 2 (Windows 11 Receiver)
+
 ```powershell
-# In PowerShell (Run as Administrator if needed)
-git clone https://github.com/gowthamsaireddy/NetworkAwareCompression.git
-cd NetworkAwareCompression
+# 1. Run automated setup script in PowerShell
+.\setup_windows.ps1
 
-# Create and activate virtual environment
-python -m venv venv
-.\venv\Scripts\Activate.ps1
+# 2. Configure Windows Firewall (Run once in Administrator PowerShell):
+New-NetFirewallRule -DisplayName "NetworkAwareCompression-Receiver" -Direction Inbound -LocalPort 5000 -Protocol TCP -Action Allow
 
-# Install receiver dependencies (including PyTorch)
-python -m pip install --upgrade pip
-pip install -r requirements/receiver.txt
+# 3. Launch Receiver GUI
+.\run_receiver.bat
 ```
 
 ---
 
-## 5. Running the Applications
+## 5. Configuration via `config.json` and Environment Variables
 
-### Step 1: Start Receiver on Laptop 2 (Windows 11)
-```powershell
-python receiver/app.py
-```
-1. Navigate to the **TCP Server** tab.
-2. Ensure Port is set to `5000` (or your configured port).
-3. Click **Start TCP Server**. The status will display `Server Listening on 0.0.0.0:5000`.
-4. (Optional) In **Model Management**, load your trained U-Net checkpoint (`.pt` or `.pth`).
+Settings can be specified in the project-root `config.json` or overridden via environment variables without altering code:
 
-### Step 2: Start Sender on Laptop 1 (Ubuntu VM)
-```bash
-python3 sender/app.py
+```json
+{
+  "sender": {
+    "receiver_ip": "192.168.10.2",
+    "receiver_port": 5000,
+    "connection_timeout": 15.0,
+    "max_retries": 3,
+    "retry_delay_sec": 1.5,
+    "dataset_path": "data/BUSI",
+    "default_quality": 70,
+    "default_network_profile": "unshaped",
+    "network_interface": "eth0",
+    "log_level": "INFO"
+  },
+  "receiver": {
+    "listen_ip": "0.0.0.0",
+    "listen_port": 5000,
+    "connection_timeout": 30.0,
+    "save_directory": "data/received",
+    "model_checkpoint_path": "models/best_unet.pt",
+    "device": "auto",
+    "auto_process_enabled": true,
+    "log_level": "INFO"
+  }
+}
 ```
-1. In **Dataset Management**, browse to the local BUSI dataset folder and click **Scan Directory**.
-2. Select any ultrasound scan to view dimensions, file size, and ground-truth masks.
-3. In **Network Emulation**, select an interface (e.g., `eth0`), choose a research profile (e.g., `2 Mbps`), and click **Apply Shaping Profile**.
-4. In **TCP Transmission**, set Receiver IP to `192.168.10.2` and Port to `5000`.
-5. Connect and send images or batch transmission.
-6. In **Adaptive Compression**, configure provisional thresholds and run adaptive trials.
+
+### Environment Variable Overrides
+- `NAC_RECEIVER_IP`: Target receiver IP address
+- `NAC_RECEIVER_PORT`: Target receiver TCP port
+- `NAC_LISTEN_PORT`: Receiver bind port
+- `NAC_AUTO_PROCESS`: `1` to enable automatic segmentation on arrival, `0` for manual
+- `NAC_MODEL_PATH`: Custom path to U-Net checkpoint (`.pt` or `.pth`)
+- `NAC_DEVICE`: Compute device (`cuda`, `cpu`, or `auto`)
+
+---
+
+## 6. End-to-End Execution Workflow
+
+### Step 1: Start Receiver on Laptop 2
+1. Run `.\run_receiver.bat`.
+2. Ensure the **Dashboard** displays `Server Status: Running` on port 5000 and `Model: Loaded (CUDA/CPU)`.
+3. Check `Auto-Process Received Images` is checked for zero-touch automatic inference.
+
+### Step 2: Start Sender on Laptop 1
+1. Run `./run_sender.sh`.
+2. On the **Transmission** tab, click **Probe Receiver** to test network reachability and measure round-trip time (RTT).
+3. Connect to the receiver.
+4. Run individual transmissions or click **Run Batch Experiment...** to execute a full sweep over multiple images and network profiles.
+
+### Step 3: Inspecting & Exporting Results
+1. On both nodes, navigate to the **Experiment Results** tab.
+2. Use the **Search bar**, **Quality filter**, and **Mode filter** to inspect specific trials.
+3. Click **Export Summary Report** to generate aggregated academic performance tables ($\text{mean} \pm \text{std}$) grouped by Quality tier.

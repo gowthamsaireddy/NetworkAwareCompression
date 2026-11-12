@@ -1,7 +1,7 @@
 """Receiver Segmentation Evaluation View (Dice & IoU)."""
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 from PIL import Image
@@ -33,7 +33,7 @@ from ui.shared.widgets import ImagePreviewBox, MetricBox, SectionHeader
 class ReceiverEvaluationView(QWidget):
     """Comparative evaluation against verified ground-truth masks (Dice and IoU metrics)."""
 
-    evaluation_completed = pyqtSignal(object, object, object)  # Emits (metadata, dice, iou)
+    evaluation_completed = pyqtSignal(object, object, object, object, object)  # Emits (metadata, dice, iou, psnr, ssim)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -45,6 +45,7 @@ class ReceiverEvaluationView(QWidget):
         self.current_result: Optional[SegmentationResult] = None
         self.current_metadata: Optional[TransmissionMetadata] = None
         self.current_comp_path: Optional[Path] = None
+        self.current_orig_path: Optional[Path] = None
         self.init_ui()
 
     def init_ui(self):
@@ -161,6 +162,9 @@ class ReceiverEvaluationView(QWidget):
         # 4. Search for Original Uncompressed Image
         self._load_original_uncompressed(metadata.image_id)
 
+        # Calculate PSNR and SSIM if original image was found
+        psnr_val, ssim_val = self._calculate_fidelity(self.current_orig_path, comp_image_path)
+
         # 5. Evaluate Metrics & Render Comparative Overlay
         if gt_mask is not None:
             # Ground truth located
@@ -187,7 +191,7 @@ class ReceiverEvaluationView(QWidget):
                 QPixmap.fromImage(q_comp_overlay),
                 caption=f"Dice: {dice:.4f} | IoU: {iou:.4f}",
             )
-            self.evaluation_completed.emit(metadata, dice, iou)
+            self.evaluation_completed.emit(metadata, dice, iou, psnr_val, ssim_val)
         else:
             # Zero Dummy-Data policy: Do not calculate or fabricate Dice/IoU
             self.gt_box.clear_image("Ground truth unavailable")
@@ -206,9 +210,30 @@ class ReceiverEvaluationView(QWidget):
                 QImage.Format.Format_RGB888,
             )
             self.overlay_box.set_pixmap(QPixmap.fromImage(q_single), caption="Prediction Only (No GT)")
-            self.evaluation_completed.emit(metadata, None, None)
+            self.evaluation_completed.emit(metadata, None, None, psnr_val, ssim_val)
 
         self.card_quality.set_value(f"Q{metadata.compression_quality}")
+
+    def _calculate_fidelity(
+        self, orig_path: Optional[Path], comp_path: Optional[Path]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if not orig_path or not comp_path or not orig_path.exists() or not comp_path.exists():
+            return None, None
+        try:
+            from sender.image_metrics import calculate_psnr, calculate_ssim
+
+            with Image.open(orig_path) as orig_pil, Image.open(comp_path) as comp_pil:
+                orig_rgb = orig_pil.convert("RGB")
+                comp_rgb = comp_pil.convert("RGB")
+                if orig_rgb.size != comp_rgb.size:
+                    comp_rgb = comp_rgb.resize(orig_rgb.size, Image.Resampling.BILINEAR)
+                orig_arr = np.array(orig_rgb)
+                comp_arr = np.array(comp_rgb)
+                psnr = calculate_psnr(orig_arr, comp_arr)
+                ssim = calculate_ssim(orig_arr, comp_arr)
+                return psnr, ssim
+        except Exception:
+            return None, None
 
     def _load_original_uncompressed(self, image_id: str):
         clean_name = Path(image_id).stem.lower()
@@ -225,6 +250,7 @@ class ReceiverEvaluationView(QWidget):
                 found_orig = candidates[0]
                 break
 
+        self.current_orig_path = found_orig
         if found_orig and found_orig.exists():
             pix = QPixmap(str(found_orig))
             self.orig_box.set_pixmap(pix, caption=f"Original: {found_orig.name}")

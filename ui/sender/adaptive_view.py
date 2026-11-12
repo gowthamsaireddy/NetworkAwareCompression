@@ -248,6 +248,19 @@ class SenderAdaptiveView(QWidget):
         )
         decision_layout.addWidget(self.decision_badge)
 
+        # Previous Decision & Scientific Rigor Disclaimer
+        prev_row = QHBoxLayout()
+        self.prev_decision_lbl = QLabel("Previous Decision: None yet")
+        self.prev_decision_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.disclaimer_lbl = QLabel(
+            "Notice: Adaptive rate controller decisions are provisional mappings and require empirical validation against fixed baseline qualities."
+        )
+        self.disclaimer_lbl.setStyleSheet("color: #64748b; font-size: 11px; font-style: italic;")
+        prev_row.addWidget(self.prev_decision_lbl)
+        prev_row.addStretch()
+        prev_row.addWidget(self.disclaimer_lbl)
+        decision_layout.addLayout(prev_row)
+
         # Action row
         action_row = QHBoxLayout()
         self.run_trial_btn = QPushButton("Execute Adaptive Transmission Trial")
@@ -391,6 +404,7 @@ class SenderAdaptiveView(QWidget):
         if success and record is not None:
             self.progress_bar.setValue(100)
             self.progress_bar.setFormat("Adaptive Trial Completed & Logged (ACK_OK)")
+            self.prev_decision_lbl.setText(f"Previous Decision: Q{record.compression_quality} ({record.notes})")
 
             # Update EWMA label
             if record.measured_throughput_kbps:

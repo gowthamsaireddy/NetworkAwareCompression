@@ -231,3 +231,84 @@ class DatasetManager:
             self.dataset_dir = Path(data["dataset_root"])
         logger.info(f"Loaded {len(self.items)} items from manifest {manifest_path}")
         return self.items
+
+    def create_stratified_splits(
+        self,
+        train_ratio: float = 0.70,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
+        random_seed: int = 42,
+        output_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Generates stratified train/validation/test splits by category.
+
+        Guarantees:
+        - Image-level stratification across 'benign', 'malignant', and 'normal'.
+        - Paired sample integrity: masks are bound to their parent image item.
+        - Zero leakage across splits.
+        - No original files are moved or modified.
+        """
+        assert abs((train_ratio + val_ratio + test_ratio) - 1.0) < 1e-5, "Split ratios must sum to 1.0"
+        if not self.items:
+            raise ValueError("No dataset items available to split. Scan dataset or load manifest first.")
+
+        from sklearn.model_selection import train_test_split
+
+        categories = [item.category for item in self.items]
+        indices = list(range(len(self.items)))
+
+        # Split off test + val
+        temp_ratio = val_ratio + test_ratio
+        train_idx, temp_idx, train_cats, temp_cats = train_test_split(
+            indices, categories, test_size=temp_ratio, random_state=random_seed, stratify=categories
+        )
+
+        # Split temp into val and test
+        val_sub_ratio = val_ratio / temp_ratio
+        val_idx, test_idx, val_cats, test_cats = train_test_split(
+            temp_idx, temp_cats, test_size=(1.0 - val_sub_ratio), random_state=random_seed, stratify=temp_cats
+        )
+
+        def _build_split_list(idx_list: List[int]) -> List[Dict[str, Any]]:
+            return [self.items[i].to_dict() for i in sorted(idx_list)]
+
+        train_items = _build_split_list(train_idx)
+        val_items = _build_split_list(val_idx)
+        test_items = _build_split_list(test_idx)
+
+        def _count_by_cat(item_dicts: List[Dict[str, Any]]) -> Dict[str, int]:
+            from collections import Counter
+            c = Counter(d["category"] for d in item_dicts)
+            return {
+                "total": len(item_dicts),
+                "benign": c.get("benign", 0),
+                "malignant": c.get("malignant", 0),
+                "normal": c.get("normal", 0),
+            }
+
+        split_data = {
+            "random_seed": random_seed,
+            "split_ratios": {
+                "train": train_ratio,
+                "validation": val_ratio,
+                "test": test_ratio,
+            },
+            "partition_type": "Image-level stratified (BUSI dataset does not contain patient-level identifiers)",
+            "total_samples": len(self.items),
+            "summary_counts": {
+                "train": _count_by_cat(train_items),
+                "validation": _count_by_cat(val_items),
+                "test": _count_by_cat(test_items),
+            },
+            "train": train_items,
+            "validation": val_items,
+            "test": test_items,
+        }
+
+        if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(split_data, f, indent=2)
+            logger.info(f"Stratified splits exported to {output_path}")
+
+        return split_data

@@ -1,0 +1,25 @@
+{
+  "sender": {
+    "receiver_ip": "127.0.0.1",
+    "receiver_port": 5000,
+    "connection_timeout": 15.0,
+    "max_retries": 3,
+    "retry_delay_sec": 1.5,
+    "dataset_path": "data/BUSI",
+    "default_quality": 70,
+    "default_network_profile": "unshaped",
+    "network_interface": "eth0",
+    "log_level": "INFO"
+  },
+  "receiver": {
+    "listen_ip": "0.0.0.0",
+    "listen_port": 5000,
+    "connection_timeout": 30.0,
+    "save_directory": "data/received",
+    "model_checkpoint_path": "models/best_unet.pt",
+    "device": "auto",
+    "auto_process_enabled": true,
+    "log_level": "INFO"
+  }
+}
+

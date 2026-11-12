@@ -156,3 +156,127 @@ class ResultsManager:
             return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
+
+    def get_record(self, experiment_id: str) -> Optional[dict[str, Any]]:
+        """Fetch a single record by experiment_id."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM experiments WHERE experiment_id = ?", (experiment_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def _sync_csv(self) -> None:
+        """Synchronizes entire CSV file with the current SQLite state."""
+        records = self.fetch_all()
+        # Sort ascending by id for chronological CSV log
+        records = sorted(records, key=lambda x: x.get("id", 0))
+        with open(self.csv_path, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(self.csv_header)
+            dict_writer = csv.DictWriter(f, fieldnames=self.csv_header)
+            for r in records:
+                row_dict = {k: r.get(k) for k in self.csv_header}
+                dict_writer.writerow(row_dict)
+
+    def record_or_update_experiment(self, record: ExperimentRecord) -> None:
+        """Inserts record if not existing, or updates mutable fields if already recorded."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM experiments WHERE experiment_id = ?", (record.experiment_id,))
+            existing = cursor.fetchone()
+
+            if existing is None:
+                conn.close()
+                self.record_experiment(record)
+                return
+
+            # Update existing record
+            cursor.execute(
+                """
+                UPDATE experiments SET
+                    timestamp = ?,
+                    image_id = ?,
+                    compression_quality = ?,
+                    original_file_size = ?,
+                    compressed_file_size = ?,
+                    compression_ratio = ?,
+                    psnr = COALESCE(?, psnr),
+                    ssim = COALESCE(?, ssim),
+                    bandwidth_limit = COALESCE(?, bandwidth_limit),
+                    packet_loss_rate = COALESCE(?, packet_loss_rate),
+                    network_delay_ms = COALESCE(?, network_delay_ms),
+                    theoretical_transmission_time_sec = COALESCE(?, theoretical_transmission_time_sec),
+                    transmission_time_sec = COALESCE(?, transmission_time_sec),
+                    measured_throughput_kbps = COALESCE(?, measured_throughput_kbps),
+                    checksum_verified = ?,
+                    dice_coefficient = COALESCE(?, dice_coefficient),
+                    iou = COALESCE(?, iou),
+                    notes = ?
+                WHERE experiment_id = ?
+                """,
+                (
+                    record.timestamp,
+                    record.image_id,
+                    record.compression_quality,
+                    record.original_file_size,
+                    record.compressed_file_size,
+                    record.compression_ratio,
+                    record.psnr,
+                    record.ssim,
+                    record.bandwidth_limit,
+                    record.packet_loss_rate,
+                    record.network_delay_ms,
+                    record.theoretical_transmission_time_sec,
+                    record.transmission_time_sec,
+                    record.measured_throughput_kbps,
+                    1 if record.checksum_verified else 0,
+                    record.dice_coefficient,
+                    record.iou,
+                    record.notes,
+                    record.experiment_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self._sync_csv()
+
+    def update_evaluation_metrics(
+        self,
+        experiment_id: str,
+        dice: Optional[float] = None,
+        iou: Optional[float] = None,
+        psnr: Optional[float] = None,
+        ssim: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Updates evaluation and fidelity metrics on an existing experimental record."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE experiments SET
+                    dice_coefficient = COALESCE(?, dice_coefficient),
+                    iou = COALESCE(?, iou),
+                    psnr = COALESCE(?, psnr),
+                    ssim = COALESCE(?, ssim),
+                    notes = COALESCE(?, notes)
+                WHERE experiment_id = ?
+                """,
+                (dice, iou, psnr, ssim, notes, experiment_id),
+            )
+            updated = cursor.rowcount > 0
+            conn.commit()
+        finally:
+            conn.close()
+
+        if updated:
+            self._sync_csv()
+        return updated
