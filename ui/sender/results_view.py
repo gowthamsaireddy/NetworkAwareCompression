@@ -125,7 +125,7 @@ class SenderResultsView(QWidget):
         self.export_summary_btn.clicked.connect(self._export_summary)
         self.load_records()
 
-    def load_records(self):
+    def load_records(self, *args, **kwargs):
         """Loads records from database and applies active filters."""
         self._all_records = self.results_manager.fetch_all()
         self._apply_filters()

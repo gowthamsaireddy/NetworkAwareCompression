@@ -167,6 +167,10 @@ class NetworkController:
         except Exception as e:
             return False, f"Error resetting tc rules: {e}"
 
+    def reset(self) -> Tuple[bool, str]:
+        """Clears all traffic shaping rules (convenience alias for reset_configuration)."""
+        return self.reset_configuration()
+
     def verify_status(self) -> str:
         """Queries the Linux kernel for actual active qdisc rules on the interface."""
         if not self.is_linux:

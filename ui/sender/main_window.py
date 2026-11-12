@@ -169,6 +169,7 @@ class SenderMainWindow(QMainWindow):
             self.dashboard_view.card_profile.set_value("Unshaped (Direct)")
 
     def _on_trial_recorded(self, record):
+        self.results_view.load_records()
         if record.transmission_time_sec is not None:
             self.dashboard_view.card_wire_time.set_value(f"{record.transmission_time_sec:.4f} s")
         if record.measured_throughput_kbps is not None:

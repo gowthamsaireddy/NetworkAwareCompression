@@ -115,6 +115,7 @@ class ReceiverModelView(QWidget):
 
         success, msg = self.model_manager.load_checkpoint(Path(path_str))
         self.card_status.set_value(self.model_manager.get_status())
+        self.card_device.set_value(str(self.model_manager.device).upper())
         if success:
             self.model_loaded.emit(self.model_manager.get_status())
             QMessageBox.information(self, "Model Loaded", msg)

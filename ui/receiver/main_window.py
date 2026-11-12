@@ -252,7 +252,8 @@ class ReceiverMainWindow(QMainWindow):
 
     def _on_model_loaded(self, status_desc: str):
         self.dashboard_view.card_model.set_value(status_desc)
-        self.dashboard_view.card_device.set_value(self.model_manager.device.upper())
+        self.dashboard_view.card_device.set_value(str(self.model_manager.device).upper())
+        self.model_view.card_device.set_value(str(self.model_manager.device).upper())
 
     def _on_image_selected_for_pipeline(self, metadata, save_path):
         self.segmentation_view.set_active_image(save_path, metadata)

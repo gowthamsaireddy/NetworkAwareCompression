@@ -54,8 +54,8 @@ class ExperimentOrchestrator:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Tuple[bool, Optional[ExperimentRecord], str]:
         """Executes a single end-to-end trial (compression -> transmission -> verification -> logging)."""
-        now_ts = int(time.time())
-        exp_id = f"{experiment_id_prefix}_{now_ts}"
+        now_ts = int(time.time() * 1000)
+        exp_id = f"{experiment_id_prefix}_{now_ts}_Q{quality}"
 
         # 1. Step 1: Compress image
         try:
@@ -201,10 +201,13 @@ class ExperimentOrchestrator:
                     break
 
                 # Apply network traffic shaping profile if specified
-                if prof:
-                    self.network_controller.apply_profile(prof)
-                else:
-                    self.network_controller.reset()
+                try:
+                    if prof:
+                        self.network_controller.apply_profile(prof)
+                    else:
+                        self.network_controller.reset()
+                except Exception as e:
+                    logger.warning(f"Network control failed (continuing unshaped): {e}")
 
                 for item_idx, item in enumerate(items):
                     if stop_requested and stop_requested():
@@ -251,7 +254,10 @@ class ExperimentOrchestrator:
 
         finally:
             # Ensure network is reset back to unshaped state
-            self.network_controller.reset()
+            try:
+                self.network_controller.reset()
+            except Exception:
+                pass
 
         summary = f"Batch finished: {completed} succeeded, {failed} failed out of {current_step} attempted."
         logger.info(summary)

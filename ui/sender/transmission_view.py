@@ -91,23 +91,26 @@ class BatchExperimentWorker(QThread):
         self._stop_requested = True
 
     def run(self):
-        def _cb(curr, total, desc, rec):
-            self.step_updated.emit(curr, total, desc)
-            if rec:
-                self.trial_finished.emit(rec)
+        try:
+            def _cb(curr, total, desc, rec):
+                self.step_updated.emit(curr, total, desc)
+                if rec:
+                    self.trial_finished.emit(rec)
 
-        def _is_stopped():
-            return self._stop_requested
+            def _is_stopped():
+                return self._stop_requested
 
-        completed, failed, recs, msg = self.orchestrator.run_batch_experiment(
-            items=self.items,
-            quality_strategy=self.quality_strategy,
-            fixed_qualities=self.fixed_qualities,
-            profiles=[self.profile],
-            progress_callback=_cb,
-            stop_requested=_is_stopped,
-        )
-        self.batch_completed.emit(completed, failed, msg)
+            completed, failed, recs, msg = self.orchestrator.run_batch_experiment(
+                items=self.items,
+                quality_strategy=self.quality_strategy,
+                fixed_qualities=self.fixed_qualities,
+                profiles=[self.profile],
+                progress_callback=_cb,
+                stop_requested=_is_stopped,
+            )
+            self.batch_completed.emit(completed, failed, msg)
+        except Exception as e:
+            self.batch_completed.emit(0, len(self.items), f"Batch experiment error: {e}")
 
 
 class SenderTransmissionView(QWidget):
@@ -487,10 +490,11 @@ class SenderTransmissionView(QWidget):
         # Insert into history table
         row = self.history_table.rowCount()
         self.history_table.insertRow(row)
-        self.history_table.setItem(row, 0, QTableWidgetItem(record.timestamp))
-        self.history_table.setItem(row, 1, QTableWidgetItem(record.image_id))
-        self.history_table.setItem(row, 2, QTableWidgetItem(str(record.compressed_file_size)))
-        self.history_table.setItem(row, 3, QTableWidgetItem(f"{record.transmission_time_sec:.4f}"))
+        self.history_table.setItem(row, 0, QTableWidgetItem(str(record.timestamp or "-")))
+        self.history_table.setItem(row, 1, QTableWidgetItem(str(record.image_id or "-")))
+        self.history_table.setItem(row, 2, QTableWidgetItem(str(record.compressed_file_size or 0)))
+        tx_str = f"{record.transmission_time_sec:.4f}" if record.transmission_time_sec is not None else "-"
+        self.history_table.setItem(row, 3, QTableWidgetItem(tx_str))
         thru = record.measured_throughput_kbps or 0.0
         self.history_table.setItem(row, 4, QTableWidgetItem(f"{thru:,.2f}"))
         self.history_table.setItem(row, 5, QTableWidgetItem("Verified" if record.checksum_verified else "Failed"))

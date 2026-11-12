@@ -86,7 +86,14 @@ class ModelManager:
                 self.model = loaded_obj.to(self.device)
             elif isinstance(loaded_obj, dict):
                 # Checkpoint is a state_dict or training dict containing 'model_state_dict' / 'state_dict'
-                state_dict = loaded_obj.get("state_dict") or loaded_obj.get("model_state_dict") or loaded_obj
+                raw_sd = loaded_obj.get("state_dict") or loaded_obj.get("model_state_dict") or loaded_obj
+                state_dict = {}
+                if isinstance(raw_sd, dict):
+                    for k, v in raw_sd.items():
+                        clean_k = k[7:] if k.startswith("module.") else k
+                        state_dict[clean_k] = v
+                else:
+                    state_dict = raw_sd
 
                 instance = None
                 if self._model_factory is not None:
