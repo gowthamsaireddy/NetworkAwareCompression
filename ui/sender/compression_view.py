@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -68,7 +69,18 @@ class SenderCompressionView(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
 
@@ -225,9 +237,9 @@ class SenderCompressionView(QWidget):
         previews_layout = QHBoxLayout()
         self.original_preview = ImagePreviewBox("Original Uncompressed Image", "No image selected")
         self.compressed_preview = ImagePreviewBox("Compressed Image Output", "Not compressed yet")
-        previews_layout.addWidget(self.original_preview)
-        previews_layout.addWidget(self.compressed_preview)
-        layout.addLayout(previews_layout, stretch=1)
+        previews_layout.addWidget(self.original_preview, 1)
+        previews_layout.addWidget(self.compressed_preview, 1)
+        layout.addLayout(previews_layout)
 
         # -------------------------------------------------------------
         # Metrics Display Grid
@@ -252,6 +264,10 @@ class SenderCompressionView(QWidget):
         metrics_grid.addWidget(self.card_ssim, 1, 2)
 
         layout.addLayout(metrics_grid)
+
+        # Finalize scroll area setup
+        scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(scroll_area)
 
         # -------------------------------------------------------------
         # Connect Actions

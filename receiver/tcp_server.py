@@ -53,7 +53,7 @@ class TCPReceiverServer:
         self.on_client_connected: Optional[Callable[[str], None]] = None
         self.on_client_disconnected: Optional[Callable[[str], None]] = None
         self.on_image_received: Optional[
-            Callable[[TransmissionMetadata, bytes, bool, Optional[Path], str], None]
+            Callable[[TransmissionMetadata, bytes, bool, Optional[Path], str, float, float], None]
         ] = None
         self.on_progress: Optional[Callable[[int, int], None]] = None
 
@@ -150,6 +150,7 @@ class TCPReceiverServer:
         """Handles framed transfers from a connected client session."""
         try:
             while self.is_running:
+                t_rx_start = time.perf_counter()
                 try:
                     metadata, image_bytes = recv_image_frame(
                         client_sock,
@@ -174,6 +175,9 @@ class TCPReceiverServer:
                         pass
                     break
 
+                t_rx_end = time.perf_counter()
+                rx_time_sec = max(t_rx_end - t_rx_start, 1e-4)
+
                 # 2. Checksum and length verification with physical timing measurement
                 t_verif_start = time.perf_counter()
                 is_valid, reason = IntegrityChecker.verify_all(image_bytes, metadata)
@@ -183,6 +187,7 @@ class TCPReceiverServer:
                 # Total received bytes on the wire
                 meta_json_bytes = metadata.to_json().encode("utf-8")
                 total_wire_bytes = IMAGE_HEADER_SIZE + len(meta_json_bytes) + len(image_bytes)
+                measured_throughput_kbps = (total_wire_bytes * 8.0) / (rx_time_sec * 1000.0)
 
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -212,10 +217,13 @@ class TCPReceiverServer:
                     send_ack_frame(client_sock, ack, timeout=10.0)
                     logger.info(
                         f"Successfully received and verified image '{metadata.image_id}' from {addr_str}. "
+                        f"Rx Time: {rx_time_sec:.4f}s, Throughput: {measured_throughput_kbps:.2f}Kbps, "
                         f"Verif: {verification_time_ms:.2f}ms, Decode: {decoding_time_ms:.2f}ms. Saved to {save_path}"
                     )
                     if self.on_image_received:
-                        self.on_image_received(metadata, image_bytes, True, save_path, now_str)
+                        self.on_image_received(
+                            metadata, image_bytes, True, save_path, now_str, rx_time_sec, measured_throughput_kbps
+                        )
                 else:
                     logger.error(
                         f"Integrity check failed for image '{metadata.image_id}' from {addr_str}: {reason}"
@@ -230,7 +238,9 @@ class TCPReceiverServer:
                     )
                     send_ack_frame(client_sock, ack, timeout=10.0)
                     if self.on_image_received:
-                        self.on_image_received(metadata, image_bytes, False, None, now_str)
+                        self.on_image_received(
+                            metadata, image_bytes, False, None, now_str, rx_time_sec, measured_throughput_kbps
+                        )
 
         except Exception as e:
             logger.error(f"Unexpected error in client session {addr_str}: {e}")

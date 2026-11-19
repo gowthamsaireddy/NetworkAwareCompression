@@ -29,7 +29,7 @@ class ReceiverSignalBridge(QObject):
     status_changed = pyqtSignal(bool, str)
     client_connected = pyqtSignal(str)
     client_disconnected = pyqtSignal(str)
-    image_received = pyqtSignal(object, object, bool, object, str)  # meta, bytes, verified, path, timestamp
+    image_received = pyqtSignal(object, object, bool, object, str, float, float)  # meta, bytes, verified, path, timestamp, rx_time, throughput
 
 
 class ReceiverTCPView(QWidget):
@@ -47,7 +47,9 @@ class ReceiverTCPView(QWidget):
         self.server.on_status_changed = lambda running, msg: self.bridge.status_changed.emit(running, msg)
         self.server.on_client_connected = lambda addr: self.bridge.client_connected.emit(addr)
         self.server.on_client_disconnected = lambda addr: self.bridge.client_disconnected.emit(addr)
-        self.server.on_image_received = lambda meta, b, v, p, t: self.bridge.image_received.emit(meta, b, v, p, t)
+        self.server.on_image_received = lambda meta, b, v, p, t, rx_t=0.0, thru=0.0: self.bridge.image_received.emit(
+            meta, b, v, p, t, rx_t, thru
+        )
 
         # Connect Qt signals to GUI slot handlers
         self.bridge.status_changed.connect(self._on_server_status)
@@ -160,6 +162,8 @@ class ReceiverTCPView(QWidget):
         verified: bool,
         save_path: Path | None,
         timestamp: str,
+        rx_time_sec: float = 0.0,
+        rx_throughput_kbps: float = 0.0,
     ):
         self.card_last_img.set_value(metadata.image_id)
         if verified:

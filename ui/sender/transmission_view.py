@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -194,7 +195,18 @@ class SenderTransmissionView(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
 
@@ -318,7 +330,12 @@ class SenderTransmissionView(QWidget):
         ])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.history_table, stretch=1)
+        self.history_table.setMinimumHeight(240)
+        layout.addWidget(self.history_table)
+
+        # Finalize scroll area setup
+        scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(scroll_area)
 
         # Connect actions
         self.probe_btn.clicked.connect(self._handle_probe)

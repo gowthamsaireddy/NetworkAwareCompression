@@ -239,9 +239,9 @@ class TestBatchExperimentOrchestration(unittest.TestCase):
         fake_items = [MagicMock(), MagicMock()]
 
         # Stop requested immediately
-        completed, failed, records, summary = orchestrator.run_batch_experiment(
+        completed, skipped, failed, records, summary = orchestrator.run_batch_experiment(
             items=fake_items,
-            quality_strategy="fixed",
+            compression_method="NORMAL",
             stop_requested=lambda: True,
         )
 

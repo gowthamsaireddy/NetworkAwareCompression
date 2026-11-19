@@ -41,6 +41,7 @@ class ReceiverMainWindow(QMainWindow):
         self.auto_process_enabled = self.config.auto_process_enabled
         self.model_manager = ModelManager(device=self.config.device if self.config.device != "auto" else None)
         self.results_manager = ResultsManager()
+        self._rx_telemetry = {}
 
         self.init_ui()
         self._auto_load_default_checkpoint()
@@ -193,11 +194,26 @@ class ReceiverMainWindow(QMainWindow):
     def _on_client_disconnected(self, client_addr: str):
         self.dashboard_view.card_client.set_value("Disconnected")
 
-    def _on_image_received(self, metadata, image_bytes, verified, save_path, timestamp):
+    def _on_image_received(
+        self,
+        metadata,
+        image_bytes,
+        verified,
+        save_path,
+        timestamp,
+        rx_time_sec: float = 0.0,
+        rx_throughput_kbps: float = 0.0,
+    ):
         # Update dashboard telemetry
         self.dashboard_view.card_exp_id.set_value(metadata.experiment_id)
         chk_status = "Verified (SHA-256 Match)" if verified else "Failed (Checksum Mismatch)"
         self.dashboard_view.card_checksum.set_value(chk_status)
+
+        # Cache measured transmission telemetry in memory
+        if not hasattr(self, "_rx_telemetry"):
+            self._rx_telemetry = {}
+        if metadata.experiment_id:
+            self._rx_telemetry[metadata.experiment_id] = (rx_time_sec, rx_throughput_kbps)
 
         if verified and save_path is not None:
             self.image_view.add_received_image(metadata, save_path)
@@ -205,12 +221,15 @@ class ReceiverMainWindow(QMainWindow):
             self.dashboard_view.card_received.set_value(str(total_count))
             self.dashboard_view.update_storage()
 
-            # Record reception in ResultsManager
+            # Record reception in ResultsManager with measured wire telemetry
             ratio = (
                 (metadata.original_file_size / metadata.compressed_file_size)
                 if metadata.compressed_file_size > 0
                 else 1.0
             )
+            tx_time_val = rx_time_sec if rx_time_sec > 0.0 else None
+            thru_val = rx_throughput_kbps if rx_throughput_kbps > 0.0 else None
+
             rec = ExperimentRecord(
                 experiment_id=metadata.experiment_id,
                 timestamp=timestamp,
@@ -225,8 +244,8 @@ class ReceiverMainWindow(QMainWindow):
                 packet_loss_rate=0.0,
                 network_delay_ms=0.0,
                 theoretical_transmission_time_sec=None,
-                transmission_time_sec=None,
-                measured_throughput_kbps=None,
+                transmission_time_sec=tx_time_val,
+                measured_throughput_kbps=thru_val,
                 checksum_verified=verified,
                 dice_coefficient=None,
                 iou=None,
@@ -305,6 +324,15 @@ class ReceiverMainWindow(QMainWindow):
             )
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+            # Look up measured transmission telemetry so we don't overwrite with None
+            tx_time_val, thru_val = None, None
+            if hasattr(self, "_rx_telemetry") and metadata.experiment_id in self._rx_telemetry:
+                cached_time, cached_thru = self._rx_telemetry[metadata.experiment_id]
+                if cached_time > 0.0:
+                    tx_time_val = cached_time
+                if cached_thru > 0.0:
+                    thru_val = cached_thru
+
             rec = ExperimentRecord(
                 experiment_id=metadata.experiment_id,
                 timestamp=now_str,
@@ -319,8 +347,8 @@ class ReceiverMainWindow(QMainWindow):
                 packet_loss_rate=0.0,
                 network_delay_ms=0.0,
                 theoretical_transmission_time_sec=None,
-                transmission_time_sec=None,
-                measured_throughput_kbps=None,
+                transmission_time_sec=tx_time_val,
+                measured_throughput_kbps=thru_val,
                 checksum_verified=True,
                 dice_coefficient=dice,
                 iou=iou,

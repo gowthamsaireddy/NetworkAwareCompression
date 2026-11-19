@@ -248,6 +248,26 @@ class ExperimentOrchestrator:
         )
         return True, record, "Trial completed and verified"
 
+    def run_adaptive_trial(
+        self,
+        item: DatasetItem,
+        profile: Optional[NetworkProfile] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Tuple[bool, Optional[ExperimentRecord], str]:
+        """Convenience method running a single trial under adaptive controller recommendations."""
+        prof_bw = profile.bandwidth_bps if profile else None
+        decision = self.adaptive_controller.evaluate_with_fallback(profile_bw_bps=prof_bw)
+        return self.run_single_trial(
+            item=item,
+            quality=decision.quality,
+            compression_method="NORMAL",
+            profile=profile,
+            experiment_id_prefix="ADAPTIVE",
+            is_adaptive=True,
+            adaptive_decision=decision,
+            progress_callback=progress_callback,
+        )
+
     def run_batch_experiment(
         self,
         items: List[DatasetItem],

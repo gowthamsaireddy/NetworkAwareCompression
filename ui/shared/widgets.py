@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from typing import Optional
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
@@ -59,26 +59,76 @@ class MetricBox(QFrame):
         self.val_lbl.setText(value)
 
 
+class ResizableImageLabel(QLabel):
+    """Custom QLabel that retains the original uncompressed QPixmap and automatically rescales
+
+    with KeepAspectRatio and SmoothTransformation on every resize event, preventing distortion,
+    clipping, or accidental zooming.
+    """
+
+    def __init__(self, placeholder: str = "", parent: Optional[QWidget] = None):
+        super().__init__(placeholder, parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._orig_pixmap: Optional[QPixmap] = None
+        self._placeholder: str = placeholder
+
+    def set_original_pixmap(self, pixmap: Optional[QPixmap]) -> None:
+        self._orig_pixmap = pixmap
+        if pixmap is None or pixmap.isNull():
+            self.clear()
+            self.setText(self._placeholder)
+        else:
+            self.setText("")
+            self._rescale()
+
+    def clear_pixmap(self, message: Optional[str] = None) -> None:
+        self._orig_pixmap = None
+        self.clear()
+        self.setText(message or self._placeholder)
+
+    def _rescale(self) -> None:
+        if self._orig_pixmap and not self._orig_pixmap.isNull():
+            sz = self.size()
+            # If label geometry has settled, scale to fit preserving aspect ratio
+            if sz.width() > 10 and sz.height() > 10:
+                scaled = self._orig_pixmap.scaled(
+                    sz,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                super().setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+    def sizeHint(self) -> QSize:
+        return QSize(256, 256)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(160, 160)
+
+
 class ImagePreviewBox(QFrame):
-    """Dedicated widget for displaying ultrasound images or placeholders."""
+    """Dedicated widget for displaying ultrasound images or placeholders with responsive scaling."""
 
     def __init__(self, title: str, placeholder: str = "No data available", parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("CardFrame")
+        self.setMinimumHeight(260)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("CardTitle")
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.image_lbl = QLabel(placeholder)
-        self.image_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_lbl = ResizableImageLabel(placeholder)
         self.image_lbl.setStyleSheet(
             "background-color: #0b1120; border: 1px dashed #334155; border-radius: 6px; color: #64748b; font-style: italic;"
         )
-        self.image_lbl.setMinimumSize(256, 256)
+        self.image_lbl.setMinimumSize(180, 180)
         self.image_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.caption_lbl = QLabel("")
@@ -90,16 +140,10 @@ class ImagePreviewBox(QFrame):
         layout.addWidget(self.caption_lbl)
 
     def set_pixmap(self, pixmap: QPixmap, caption: str = "") -> None:
-        scaled = pixmap.scaled(
-            self.image_lbl.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_lbl.setPixmap(scaled)
+        self.image_lbl.set_original_pixmap(pixmap)
         self.caption_lbl.setText(caption)
 
     def clear_image(self, message: str = "No data available") -> None:
-        self.image_lbl.clear()
-        self.image_lbl.setText(message)
+        self.image_lbl.clear_pixmap(message)
         self.caption_lbl.setText("")
 
