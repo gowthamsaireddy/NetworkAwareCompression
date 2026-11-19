@@ -140,6 +140,22 @@ def send_image_frame(
             progress_callback(bytes_sent, total_bytes)
 
 
+def parse_image_header(header_bytes: bytes) -> Tuple[bytes, int, int, int]:
+    """Parses and validates a 14-byte binary image header."""
+    if len(header_bytes) != IMAGE_HEADER_SIZE:
+        raise ValueError(f"Header length mismatch: expected {IMAGE_HEADER_SIZE}, got {len(header_bytes)}")
+    magic, version, meta_len, img_len = struct.unpack(IMAGE_HEADER_FORMAT, header_bytes)
+    if magic != MAGIC_BYTES:
+        raise ValueError(f"Invalid frame magic: received {magic!r}, expected {MAGIC_BYTES!r}")
+    if version != PROTOCOL_VERSION:
+        raise ValueError(f"Unsupported protocol version: {version} (expected {PROTOCOL_VERSION})")
+    if meta_len > MAX_METADATA_SIZE:
+        raise ValueError(f"Metadata length {meta_len} exceeds safety limit ({MAX_METADATA_SIZE} bytes)")
+    if img_len > MAX_IMAGE_PAYLOAD_SIZE:
+        raise ValueError(f"Image payload length {img_len} exceeds safety limit ({MAX_IMAGE_PAYLOAD_SIZE} bytes)")
+    return magic, version, meta_len, img_len
+
+
 def recv_image_frame(
     sock: socket.socket,
     timeout: Optional[float] = None,
@@ -148,20 +164,7 @@ def recv_image_frame(
     """Receives and deserializes an image frame from a TCP socket handling partial reads."""
     # 1. Read binary header (14 bytes)
     header_bytes = recv_exact(sock, IMAGE_HEADER_SIZE, timeout=timeout)
-    magic, version, meta_len, img_len = struct.unpack(IMAGE_HEADER_FORMAT, header_bytes)
-
-    if magic != MAGIC_BYTES:
-        raise ValueError(f"Invalid frame magic: received {magic!r}, expected {MAGIC_BYTES!r}")
-
-    if version != PROTOCOL_VERSION:
-        raise ValueError(f"Unsupported protocol version: {version} (expected {PROTOCOL_VERSION})")
-
-    # Safety bounds validation
-    if meta_len > MAX_METADATA_SIZE:
-        raise ValueError(f"Metadata length {meta_len} exceeds safety limit ({MAX_METADATA_SIZE} bytes)")
-
-    if img_len > MAX_IMAGE_PAYLOAD_SIZE:
-        raise ValueError(f"Image payload length {img_len} exceeds safety limit ({MAX_IMAGE_PAYLOAD_SIZE} bytes)")
+    magic, version, meta_len, img_len = parse_image_header(header_bytes)
 
     # 2. Read metadata JSON payload
     meta_bytes = recv_exact(sock, meta_len, timeout=timeout)

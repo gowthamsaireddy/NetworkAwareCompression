@@ -7,6 +7,9 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
+import cv2
+import numpy as np
+
 from common.config import DATA_DIR
 from common.logging_config import setup_logger
 from receiver.image_receiver import ImageReceiverManager
@@ -20,7 +23,7 @@ from shared.constants import (
     DEFAULT_PORT,
 )
 from shared.metadata import AcknowledgmentMessage, TransmissionMetadata
-from shared.protocol import recv_image_frame, send_ack_frame
+from shared.protocol import IMAGE_HEADER_SIZE, recv_image_frame, send_ack_frame
 
 logger = setup_logger("TCPReceiverServer")
 
@@ -171,21 +174,45 @@ class TCPReceiverServer:
                         pass
                     break
 
-                # 2. Checksum and length verification
+                # 2. Checksum and length verification with physical timing measurement
+                t_verif_start = time.perf_counter()
                 is_valid, reason = IntegrityChecker.verify_all(image_bytes, metadata)
+                t_verif_end = time.perf_counter()
+                verification_time_ms = max((t_verif_end - t_verif_start) * 1000.0, 0.001)
+
+                # Total received bytes on the wire
+                meta_json_bytes = metadata.to_json().encode("utf-8")
+                total_wire_bytes = IMAGE_HEADER_SIZE + len(meta_json_bytes) + len(image_bytes)
+
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 if is_valid:
+                    # Measure image decoding time
+                    decoding_time_ms = 0.0
+                    try:
+                        t_dec_start = time.perf_counter()
+                        nparr = np.frombuffer(image_bytes, np.uint8)
+                        decoded_test = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        t_dec_end = time.perf_counter()
+                        if decoded_test is not None:
+                            decoding_time_ms = max((t_dec_end - t_dec_start) * 1000.0, 0.001)
+                    except Exception as e:
+                        logger.warning(f"Could not benchmark decoding time for {metadata.image_id}: {e}")
+
                     # Save image to storage
                     save_path = self.image_manager.save_image(metadata, image_bytes, now_str)
                     ack = AcknowledgmentMessage(
                         status_code=ACK_OK,
                         image_id=metadata.image_id,
                         sha256_verified=True,
+                        decoding_time_ms=decoding_time_ms,
+                        verification_time_ms=verification_time_ms,
+                        received_bytes=total_wire_bytes,
                     )
                     send_ack_frame(client_sock, ack, timeout=10.0)
                     logger.info(
-                        f"Successfully received and verified image '{metadata.image_id}' from {addr_str}. Saved to {save_path}"
+                        f"Successfully received and verified image '{metadata.image_id}' from {addr_str}. "
+                        f"Verif: {verification_time_ms:.2f}ms, Decode: {decoding_time_ms:.2f}ms. Saved to {save_path}"
                     )
                     if self.on_image_received:
                         self.on_image_received(metadata, image_bytes, True, save_path, now_str)
@@ -198,6 +225,8 @@ class TCPReceiverServer:
                         image_id=metadata.image_id,
                         sha256_verified=False,
                         error_message=reason,
+                        verification_time_ms=verification_time_ms,
+                        received_bytes=total_wire_bytes,
                     )
                     send_ack_frame(client_sock, ack, timeout=10.0)
                     if self.on_image_received:

@@ -31,6 +31,16 @@ class TransmissionReport:
     ack_status: int
     timestamp: str
     error_message: Optional[str] = None
+    wire_time_sec: float = 0.0
+    round_trip_time_sec: float = 0.0
+    connection_time_ms: float = 0.0
+    effective_bandwidth_kbps: float = 0.0
+    decoding_time_ms: Optional[float] = None
+    verification_time_ms: Optional[float] = None
+    inference_time_ms: Optional[float] = None
+    dice: Optional[float] = None
+    iou: Optional[float] = None
+    received_bytes: Optional[int] = None
 
     @property
     def is_success(self) -> bool:
@@ -47,6 +57,7 @@ class TCPTransmissionClient:
         self.timeout = timeout
         self.sock: Optional[socket.socket] = None
         self.transfer_history: List[TransmissionReport] = []
+        self.last_connection_time_ms: float = 0.0
 
     def connect(self) -> Tuple[bool, str]:
         """Establishes connection to the receiver TCP server."""
@@ -54,11 +65,13 @@ class TCPTransmissionClient:
             return True, f"Already connected to {self.host}:{self.port}"
 
         try:
+            t_conn_start = time.perf_counter()
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
             sock.connect((self.host, self.port))
+            self.last_connection_time_ms = (time.perf_counter() - t_conn_start) * 1000.0
             self.sock = sock
-            msg = f"Connected to {self.host}:{self.port}"
+            msg = f"Connected to {self.host}:{self.port} in {self.last_connection_time_ms:.2f}ms"
             logger.info(msg)
             return True, msg
         except Exception as e:
@@ -157,10 +170,10 @@ class TCPTransmissionClient:
             assert self.sock is not None
 
             try:
-                # Measure actual elapsed transmission duration
-                t_start = time.perf_counter()
+                total_bytes = IMAGE_HEADER_SIZE + len(metadata.to_json().encode("utf-8")) + len(image_bytes)
 
-                # Transmit binary frame over TCP
+                # 1. Pure wire transmission measurement
+                t_wire_start = time.perf_counter()
                 send_image_frame(
                     self.sock,
                     metadata,
@@ -168,31 +181,42 @@ class TCPTransmissionClient:
                     progress_callback=progress_callback,
                     timeout=self.timeout,
                 )
+                t_wire_end = time.perf_counter()
+                wire_time_sec = max(t_wire_end - t_wire_start, 1e-6)
+                wire_throughput_kbps = (total_bytes * 8.0) / (wire_time_sec * 1000.0)
 
-                # Await receiver acknowledgment confirming byte count & SHA-256
+                # 2. Await receiver acknowledgment confirming byte count, SHA-256 & receiver metrics
                 ack = recv_ack_frame(self.sock, timeout=self.timeout)
-                t_end = time.perf_counter()
-
-                # Physical measurements
-                elapsed_sec = max(t_end - t_start, 1e-6)
-                total_bytes = IMAGE_HEADER_SIZE + len(metadata.to_json().encode("utf-8")) + len(image_bytes)
-                throughput_kbps = (total_bytes * 8.0) / (elapsed_sec * 1000.0)
+                t_ack_end = time.perf_counter()
+                rtt_sec = max(t_ack_end - t_wire_start, 1e-6)
+                effective_bw_kbps = (total_bytes * 8.0) / (rtt_sec * 1000.0)
 
                 report = TransmissionReport(
                     image_id=metadata.image_id,
                     bytes_sent=total_bytes,
-                    transmission_time_sec=elapsed_sec,
-                    throughput_kbps=throughput_kbps,
+                    transmission_time_sec=wire_time_sec,
+                    throughput_kbps=wire_throughput_kbps,
                     checksum_verified=ack.sha256_verified,
                     ack_status=ack.status_code,
                     timestamp=now_str,
                     error_message=ack.error_message,
+                    wire_time_sec=wire_time_sec,
+                    round_trip_time_sec=rtt_sec,
+                    connection_time_ms=self.last_connection_time_ms,
+                    effective_bandwidth_kbps=effective_bw_kbps,
+                    decoding_time_ms=ack.decoding_time_ms,
+                    verification_time_ms=ack.verification_time_ms,
+                    inference_time_ms=ack.inference_time_ms,
+                    dice=ack.dice,
+                    iou=ack.iou,
+                    received_bytes=ack.received_bytes,
                 )
 
                 if report.is_success:
                     logger.info(
-                        f"Transfer succeeded for {metadata.image_id}: {total_bytes} bytes in {elapsed_sec:.4f}s "
-                        f"({throughput_kbps:.2f} Kbps). Checksum verified."
+                        f"Transfer succeeded for {metadata.image_id}: {total_bytes} bytes in {wire_time_sec:.4f}s "
+                        f"(Wire: {wire_throughput_kbps:.2f} Kbps, RTT: {rtt_sec:.4f}s / {effective_bw_kbps:.2f} Kbps). "
+                        f"Checksum verified."
                     )
                     self.transfer_history.append(report)
                     return report

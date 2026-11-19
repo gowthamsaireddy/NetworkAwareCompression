@@ -54,6 +54,8 @@ models/*
 !models/README.md
 !models/unet.py
 !models/train_unet.py
+!models/roi_detector.py
+!models/train_roi_detector.py
 
 # Dataset directories and image files (Never commit datasets)
 data/*

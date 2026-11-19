@@ -95,13 +95,20 @@ class SenderNetworkView(QWidget):
         self.delay_spin.setValue(5)
         form_grid.addWidget(self.delay_spin, 3, 1)
 
+        # Jitter
+        form_grid.addWidget(QLabel("Delay Jitter (ms):"), 4, 0)
+        self.jitter_spin = QSpinBox()
+        self.jitter_spin.setRange(0, 100)
+        self.jitter_spin.setValue(1)
+        form_grid.addWidget(self.jitter_spin, 4, 1)
+
         # Packet Loss
-        form_grid.addWidget(QLabel("Packet Loss Rate (%):"), 4, 0)
+        form_grid.addWidget(QLabel("Packet Loss Rate (%):"), 5, 0)
         self.loss_spin = QDoubleSpinBox()
         self.loss_spin.setRange(0.0, 50.0)
         self.loss_spin.setSingleStep(0.1)
         self.loss_spin.setValue(0.0)
-        form_grid.addWidget(self.loss_spin, 4, 1)
+        form_grid.addWidget(self.loss_spin, 5, 1)
 
         layout.addWidget(config_frame)
 
@@ -141,18 +148,21 @@ class SenderNetworkView(QWidget):
         if profile is not None:
             self.bw_input.setCurrentText(profile.bandwidth)
             self.delay_spin.setValue(profile.delay_ms)
+            self.jitter_spin.setValue(getattr(profile, "jitter_ms", 0))
             self.loss_spin.setValue(profile.loss_percent)
 
     def _confirm_and_apply(self):
         iface = self.iface_combo.currentText()
         bw = self.bw_input.currentText().strip()
         delay = self.delay_spin.value()
+        jitter = self.jitter_spin.value()
         loss = self.loss_spin.value()
 
         profile = NetworkProfile(
-            name=f"{bw} (delay={delay}ms, loss={loss}%)",
+            name=f"{bw} (delay={delay}ms ±{jitter}ms, loss={loss}%)",
             bandwidth=bw,
             delay_ms=delay,
+            jitter_ms=jitter,
             loss_percent=loss,
         )
 
@@ -160,6 +170,7 @@ class SenderNetworkView(QWidget):
             f"Apply the following traffic shaping rules on interface '{iface}'?\n\n"
             f"• Bandwidth: {bw}\n"
             f"• Added Delay: {delay} ms\n"
+            f"• Jitter: ±{jitter} ms\n"
             f"• Packet Loss: {loss} %\n\n"
             "This will alter kernel network queueing (qdisc). Proceed?"
         )

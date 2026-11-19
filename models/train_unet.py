@@ -168,16 +168,67 @@ def calculate_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: fl
         return dice, iou
 
 
+def compute_mgda_lambda(
+    g_dice: List[torch.Tensor],
+    g_bce: List[torch.Tensor],
+    eps: float = 1e-8,
+) -> float:
+    """Computes optimal lambda* for combining Dice (g_dice) and BCE (g_bce) gradients via MGDA (Sener & Koltun 2018).
+
+    Solves: min_{0 <= lambda <= 1} ||lambda*g_dice + (1-lambda)*g_bce||^2
+    Analytical closed-form:
+      hat_lambda = (||g_bce||^2 - <g_dice, g_bce>) / ||g_dice - g_bce||^2
+      lambda* = clip(hat_lambda, 0.0, 1.0)
+    Combined descent vector:
+      g* = lambda* * g_dice + (1 - lambda*) * g_bce
+    """
+    # Safety Check 1: Check for invalid gradients (NaN or Inf)
+    g_dice_valid = all(torch.isfinite(g).all() for g in g_dice if g is not None)
+    g_bce_valid = all(torch.isfinite(g).all() for g in g_bce if g is not None)
+
+    if not g_dice_valid and not g_bce_valid:
+        return 0.5
+    elif not g_dice_valid:
+        return 0.0  # Fallback entirely to BCE
+    elif not g_bce_valid:
+        return 1.0  # Fallback entirely to Dice
+
+    g1_dot_g1 = sum((g * g).sum() for g in g_dice if g is not None)
+    g2_dot_g2 = sum((g * g).sum() for g in g_bce if g is not None)
+    g1_dot_g2 = sum((g_a * g_b).sum() for g_a, g_b in zip(g_dice, g_bce) if g_a is not None and g_b is not None)
+
+    # ||g_dice - g_bce||^2 = ||g_dice||^2 + ||g_bce||^2 - 2 * <g_dice, g_bce>
+    denom = g1_dot_g1 + g2_dot_g2 - 2.0 * g1_dot_g2
+
+    # Safety Check 2: Near-zero denominator or degenerate zero gradient distance
+    if torch.isnan(denom) or torch.isinf(denom) or denom.item() < eps:
+        return 0.5
+
+    hat_lambda = (g2_dot_g2 - g1_dot_g2) / denom
+
+    # Safety Check 3: Ensure finite scalar before clamping
+    if torch.isnan(hat_lambda) or torch.isinf(hat_lambda):
+        return 0.5
+
+    lambda_star = torch.clamp(hat_lambda, 0.0, 1.0).item()
+    return float(lambda_star)
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
-) -> float:
-    """Trains for one epoch over the training split."""
+) -> Tuple[float, float, float]:
+    """Trains for one epoch over the training split using fixed scalar weighting."""
     model.train()
     running_loss = 0.0
+    running_bce = 0.0
+    running_dice = 0.0
+
+    bce_fn = nn.BCEWithLogitsLoss()
+    dice_fn = DiceLoss(smooth=1.0)
 
     for images, masks in loader:
         images = images.to(device)
@@ -189,20 +240,101 @@ def train_epoch(
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item() * images.size(0)
+        bce_val = bce_fn(logits, masks).item()
+        dice_val = dice_fn(logits, masks).item()
 
-    return running_loss / len(loader.dataset)
+        bs = images.size(0)
+        running_loss += loss.item() * bs
+        running_bce += bce_val * bs
+        running_dice += dice_val * bs
+
+    n = len(loader.dataset)
+    return running_loss / n, running_bce / n, running_dice / n
+
+
+def train_epoch_mgda(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    dice_criterion: nn.Module,
+    bce_criterion: nn.Module,
+    device: torch.device,
+) -> Tuple[float, float, float, float]:
+    """Trains for one epoch using Multiple Gradient Descent Algorithm (MGDA).
+
+    Dynamically calculates lambda* for every mini-batch to find the minimum-norm
+    common descent vector in the convex hull of Dice and BCE gradients.
+
+    Returns:
+        (mean_loss, mean_bce, mean_dice, mean_lambda)
+    """
+    model.train()
+    running_loss = 0.0
+    running_bce = 0.0
+    running_dice = 0.0
+    running_lambda = 0.0
+
+    for images, masks in loader:
+        images = images.to(device)
+        masks = masks.to(device)
+
+        # Step 1: Forward pass
+        logits = model(images)
+        loss_dice = dice_criterion(logits, masks)
+        loss_bce = bce_criterion(logits, masks)
+
+        # Step 2: Backward pass for Dice Loss (retain computational graph for BCE)
+        optimizer.zero_grad()
+        loss_dice.backward(retain_graph=True)
+        g_dice = [p.grad.clone() if p.grad is not None else None for p in model.parameters()]
+
+        # Step 3: Backward pass for BCE Loss
+        optimizer.zero_grad()
+        loss_bce.backward()
+        g_bce = [p.grad.clone() if p.grad is not None else None for p in model.parameters()]
+
+        # Step 4: Solve analytical min-norm problem for optimal lambda*
+        lambda_star = compute_mgda_lambda(g_dice, g_bce)
+
+        # Step 5: Construct Pareto-optimal gradient: g* = lambda* * g_dice + (1 - lambda*) * g_bce
+        for p, grad_dice, grad_bce in zip(model.parameters(), g_dice, g_bce):
+            if p.grad is not None and grad_dice is not None and grad_bce is not None:
+                p.grad.copy_(lambda_star * grad_dice + (1.0 - lambda_star) * grad_bce)
+
+        # Step 6: Parameter update
+        optimizer.step()
+
+        batch_loss = lambda_star * loss_dice.item() + (1.0 - lambda_star) * loss_bce.item()
+        bs = images.size(0)
+        running_loss += batch_loss * bs
+        running_bce += loss_bce.item() * bs
+        running_dice += loss_dice.item() * bs
+        running_lambda += lambda_star
+
+    dataset_size = len(loader.dataset)
+    num_batches = max(len(loader), 1)
+    mean_loss = running_loss / dataset_size
+    mean_bce = running_bce / dataset_size
+    mean_dice = running_dice / dataset_size
+    mean_lambda = running_lambda / num_batches
+    return mean_loss, mean_bce, mean_dice, mean_lambda
 
 
 def validate(
     model: nn.Module,
     loader: DataLoader,
-    criterion: nn.Module,
+    dice_criterion: nn.Module,
+    bce_criterion: nn.Module,
     device: torch.device,
-) -> Tuple[float, float, float]:
-    """Evaluates model strictly on the validation split."""
+) -> Tuple[float, float, float, float, float]:
+    """Evaluates model strictly on the validation split.
+
+    Returns:
+        (val_loss, val_bce, val_dice_loss, val_dice, val_iou)
+    """
     model.eval()
-    running_loss = 0.0
+    running_bce = 0.0
+    running_dice = 0.0
     dice_scores = []
     iou_scores = []
 
@@ -212,8 +344,12 @@ def validate(
             masks = masks.to(device)
 
             logits = model(images)
-            loss = criterion(logits, masks)
-            running_loss += loss.item() * images.size(0)
+            bce = bce_criterion(logits, masks)
+            dice_l = dice_criterion(logits, masks)
+
+            bs = images.size(0)
+            running_bce += bce.item() * bs
+            running_dice += dice_l.item() * bs
 
             # Evaluate each sample in batch individually for precise metric averaging
             for i in range(images.size(0)):
@@ -221,11 +357,14 @@ def validate(
                 dice_scores.append(d)
                 iou_scores.append(j)
 
-    val_loss = running_loss / len(loader.dataset)
+    dataset_size = len(loader.dataset)
+    val_bce = running_bce / dataset_size
+    val_dice_loss = running_dice / dataset_size
+    val_loss = 0.5 * val_bce + 0.5 * val_dice_loss
     val_dice = float(np.mean(dice_scores)) if dice_scores else 0.0
     val_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
 
-    return val_loss, val_dice, val_iou
+    return val_loss, val_bce, val_dice_loss, val_dice, val_iou
 
 
 def run_training(
@@ -235,6 +374,7 @@ def run_training(
     patience: int = 7,
     seed: int = 42,
     device_str: Optional[str] = None,
+    use_mgda: bool = True,
 ) -> Dict:
     """Executes U-Net training on the training split with validation checkpoint selection."""
     set_seed(seed)
@@ -257,7 +397,6 @@ def run_training(
 
     train_items = splits["train"]
     val_items = splits["validation"]
-    # Verify test items are NOT accessed
     print(f"[+] Loaded {len(train_items)} training samples, {len(val_items)} validation samples.")
     print(f"[+] Held-out test set: {len(splits['test'])} samples (STRICTLY UNTOUCHED).")
 
@@ -274,6 +413,8 @@ def run_training(
     print(f"[+] Initialized UNet (Trainable Parameters: {total_params:,})")
 
     criterion = CombinedBCEDiceLoss(bce_weight=0.5, dice_weight=0.5)
+    dice_criterion = DiceLoss(smooth=1.0)
+    bce_criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
@@ -286,7 +427,12 @@ def run_training(
 
     history = {
         "train_loss": [],
+        "train_bce_loss": [],
+        "train_dice_loss": [],
+        "mean_lambda": [],
         "val_loss": [],
+        "val_bce_loss": [],
+        "val_dice_loss": [],
         "val_dice": [],
         "val_iou": [],
         "lr": [],
@@ -295,25 +441,46 @@ def run_training(
 
     models_dir = PROJECT_ROOT / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    best_checkpoint_path = models_dir / "best_unet.pth"
+    checkpoint_name = "best_unet_mgda.pth" if use_mgda else "best_unet.pth"
+    best_checkpoint_path = models_dir / checkpoint_name
 
     start_total_time = time.perf_counter()
-    print("\n" + "=" * 80)
-    print(f"{'Epoch':<8} | {'Train Loss':<12} | {'Val Loss':<12} | {'Val Dice':<10} | {'Val IoU':<10} | {'Time (s)':<10} | {'Status'}")
-    print("=" * 80)
+    print("\n" + "=" * 105)
+    if use_mgda:
+        print("[+] Optimization Mode: MGDA (Multiple Gradient Descent Algorithm - Sener & Koltun 2018)")
+    else:
+        print("[+] Optimization Mode: Standard Fixed BCE+Dice (50/50)")
+    print(f"{'Epoch':<6} | {'Tr Loss':<9} | {'Tr BCE':<9} | {'Tr Dice':<9} | {'Val Loss':<9} | {'Val Dice':<9} | {'Val IoU':<9} | {'Mean λ*':<9} | {'Time (s)':<8} | {'Status'}")
+    print("=" * 105)
 
     for epoch in range(1, epochs + 1):
         t0 = time.perf_counter()
 
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_dice, val_iou = validate(model, val_loader, criterion, device)
+        if use_mgda:
+            train_loss, tr_bce, tr_dice, mean_lambda = train_epoch_mgda(
+                model, train_loader, optimizer, dice_criterion, bce_criterion, device
+            )
+        else:
+            train_loss, tr_bce, tr_dice = train_epoch(
+                model, train_loader, optimizer, criterion, device
+            )
+            mean_lambda = 0.5
+
+        val_loss, val_bce, val_dice_l, val_dice, val_iou = validate(
+            model, val_loader, dice_criterion, bce_criterion, device
+        )
         scheduler.step()
 
         elapsed = time.perf_counter() - t0
         curr_lr = optimizer.param_groups[0]["lr"]
 
         history["train_loss"].append(train_loss)
+        history["train_bce_loss"].append(tr_bce)
+        history["train_dice_loss"].append(tr_dice)
+        history["mean_lambda"].append(mean_lambda)
         history["val_loss"].append(val_loss)
+        history["val_bce_loss"].append(val_bce)
+        history["val_dice_loss"].append(val_dice_l)
         history["val_dice"].append(val_dice)
         history["val_iou"].append(val_iou)
         history["lr"].append(curr_lr)
@@ -347,17 +514,18 @@ def run_training(
                     "lr": lr,
                     "seed": seed,
                     "device": str(device),
+                    "optimization_mode": "MGDA" if use_mgda else "Standard_BCE_Dice_0.5",
                 },
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             torch.save(checkpoint_payload, best_checkpoint_path)
-            status = "(*) Best Checkpoint Saved"
+            status = "(*) Best Saved"
         else:
             patience_counter += 1
             status = f"Patience: {patience_counter}/{patience}"
 
         print(
-            f"{epoch:<8} | {train_loss:<12.4f} | {val_loss:<12.4f} | {val_dice:<10.4f} | {val_iou:<10.4f} | {elapsed:<10.2f} | {status}"
+            f"{epoch:<6} | {train_loss:<9.4f} | {tr_bce:<9.4f} | {tr_dice:<9.4f} | {val_loss:<9.4f} | {val_dice:<9.4f} | {val_iou:<9.4f} | {mean_lambda:<9.4f} | {elapsed:<8.2f} | {status}"
         )
 
         if patience_counter >= patience:
@@ -365,13 +533,14 @@ def run_training(
             break
 
     total_training_sec = time.perf_counter() - start_total_time
-    print("=" * 80)
+    print("=" * 105)
     print(f"[+] Training completed in {total_training_sec:.2f} seconds.")
     print(f"[+] Best Validation Checkpoint: Epoch {best_epoch} with Dice={best_val_dice:.4f}, IoU={best_val_iou:.4f}, Loss={best_val_loss:.4f}")
     print(f"[+] Checkpoint saved to: {best_checkpoint_path}")
 
     # 6. Save training history JSON
-    history_path = models_dir / "training_history.json"
+    history_name = "training_history_mgda.json" if use_mgda else "training_history.json"
+    history_path = models_dir / history_name
     history_payload = {
         "best_epoch": best_epoch,
         "best_val_dice": best_val_dice,
@@ -389,14 +558,18 @@ def run_training(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train U-Net on BUSI dataset.")
+    parser = argparse.ArgumentParser(description="Train U-Net on BUSI dataset using MGDA or fixed loss weighting.")
     parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--patience", type=int, default=7, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device ('cuda' or 'cpu')")
+    parser.add_argument("--use-fixed", action="store_true", help="Use legacy fixed lambda=0.5 weighting instead of MGDA")
+    parser.add_argument("--mgda", action="store_true", default=True, help="Train using MGDA (default: True)")
     args = parser.parse_args()
+
+    use_mgda = not args.use_fixed
 
     run_training(
         epochs=args.epochs,
@@ -405,5 +578,6 @@ if __name__ == "__main__":
         patience=args.patience,
         seed=args.seed,
         device_str=args.device,
+        use_mgda=use_mgda,
     )
 

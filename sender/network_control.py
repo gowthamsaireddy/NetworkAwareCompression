@@ -21,6 +21,7 @@ class NetworkProfile:
     name: str
     bandwidth: str  # e.g., "10mbit", "2mbit", "512kbit", "128kbit"
     delay_ms: int = 0
+    jitter_ms: int = 0
     loss_percent: float = 0.0
 
     @property
@@ -30,10 +31,10 @@ class NetworkProfile:
 
 
 PRESET_PROFILES = [
-    NetworkProfile("10 Mbps (High Speed)", "10mbit", delay_ms=5, loss_percent=0.0),
-    NetworkProfile("2 Mbps (Medium Speed)", "2mbit", delay_ms=20, loss_percent=0.5),
-    NetworkProfile("512 Kbps (Constrained)", "512kbit", delay_ms=50, loss_percent=1.0),
-    NetworkProfile("128 Kbps (Severely Constrained)", "128kbit", delay_ms=100, loss_percent=2.0),
+    NetworkProfile("10 Mbps (High Speed)", "10mbit", delay_ms=5, jitter_ms=1, loss_percent=0.0),
+    NetworkProfile("2 Mbps (Medium Speed)", "2mbit", delay_ms=20, jitter_ms=5, loss_percent=0.5),
+    NetworkProfile("512 Kbps (Constrained)", "512kbit", delay_ms=50, jitter_ms=10, loss_percent=1.0),
+    NetworkProfile("128 Kbps (Severely Constrained)", "128kbit", delay_ms=100, jitter_ms=20, loss_percent=2.0),
 ]
 
 
@@ -125,7 +126,10 @@ class NetworkController:
         if profile.bandwidth:
             cmd.extend(["rate", profile.bandwidth])
         if profile.delay_ms > 0:
-            cmd.extend(["delay", f"{profile.delay_ms}ms"])
+            if getattr(profile, "jitter_ms", 0) > 0:
+                cmd.extend(["delay", f"{profile.delay_ms}ms", f"{profile.jitter_ms}ms"])
+            else:
+                cmd.extend(["delay", f"{profile.delay_ms}ms"])
         if profile.loss_percent > 0:
             cmd.extend(["loss", f"{profile.loss_percent}%"])
 
