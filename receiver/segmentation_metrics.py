@@ -5,6 +5,7 @@ Enforces strict Zero Dummy-Data policy: returns None if ground truth is unavaila
 """
 
 from pathlib import Path
+import re
 from typing import List, Optional, Tuple, Union
 import cv2
 import numpy as np
@@ -13,6 +14,51 @@ from PIL import Image
 from common.logging_config import setup_logger
 
 logger = setup_logger("SegmentationMetrics")
+
+
+def get_canonical_busi_id(raw_id: str) -> Tuple[str, str, str, str]:
+    """Extracts canonical BUSI dataset identification from any image_id variant.
+
+    Robustly handles:
+      - 'benign/benign (1)' -> orig_id='benign/benign (1)', base_stem='benign (1)', cat='benign', orig_filename='benign (1).png'
+      - 'benign (1)' -> orig_id='benign/benign (1)', base_stem='benign (1)', cat='benign', orig_filename='benign (1).png'
+      - 'benign_benign (1)' -> orig_id='benign/benign (1)', base_stem='benign (1)', cat='benign', orig_filename='benign (1).png'
+      - 'benign_benign (148)_Q90_RUN_...' -> orig_id='benign/benign (148)', base_stem='benign (148)', cat='benign', orig_filename='benign (148).png'
+      - 'BG70_Satellite_benign_benign__148_' -> orig_id='benign/benign (148)', base_stem='benign (148)', cat='benign', orig_filename='benign (148).png'
+      - 'malignant/malignant (23)' -> orig_id='malignant/malignant (23)', base_stem='malignant (23)', cat='malignant', orig_filename='malignant (23).png'
+      - 'normal/normal (5)' -> orig_id='normal/normal (5)', base_stem='normal (5)', cat='normal', orig_filename='normal (5).png'
+
+    Returns:
+        (original_image_id, base_stem, category, original_filename)
+    """
+    s = str(raw_id).strip().replace("\\", "/")
+    tail = s.split("/")[-1].strip() if "/" in s else s
+
+    # 1. Determine category: benign, malignant, normal
+    cat = "benign"
+    low_s = s.lower()
+    for c in ("malignant", "normal", "benign"):
+        if c in low_s:
+            cat = c
+            break
+
+    # 2. Extract BUSI index number (e.g. '(148)', '__148_', '_148_', or bare '148')
+    num_match = re.search(r"\(\s*(\d+)\s*\)", tail)
+    if not num_match:
+        num_match = re.search(r"__(\d+)_", tail)
+    if not num_match:
+        num_match = re.search(r"[\s_](\d+)(?:[^\d]|$)", tail)
+
+    if num_match:
+        num = num_match.group(1)
+        base_stem = f"{cat} ({num})"
+    else:
+        # Fallback to tail without extension
+        base_stem = Path(tail).stem
+
+    orig_id = f"{cat}/{base_stem}"
+    orig_filename = f"{base_stem}.png"
+    return orig_id, base_stem, cat, orig_filename
 
 
 def compute_dice_coefficient(ground_truth: np.ndarray, prediction: np.ndarray, smooth: float = 1e-6) -> float:
@@ -52,42 +98,82 @@ def compute_iou(ground_truth: np.ndarray, prediction: np.ndarray, smooth: float 
     return float(np.clip(iou, 0.0, 1.0))
 
 
-def locate_ground_truth_mask(image_id: str, search_roots: List[Path]) -> Optional[np.ndarray]:
+def locate_ground_truth_mask(
+    image_id: str, search_roots: List[Path]
+) -> Tuple[Optional[np.ndarray], Optional[str], List[Path]]:
     """Locates and loads ground-truth mask(s) for a given image_id across search roots.
 
-    Combines multiple lesion masks if present using bitwise maximum.
+    Performs exact base stem matching to eliminate false substring matches.
+    Combines multiple lesion masks (e.g., _mask.png, _mask_1.png) using bitwise maximum.
     Resizes combined mask to target 256x256 using nearest-neighbor interpolation.
-    Returns None if no ground truth mask exists.
+
+    Returns:
+        (combined_mask_256, mask_identifier, matching_file_paths)
+        or (None, None, []) if no ground truth mask exists.
     """
-    clean_id = Path(image_id).stem.lower().replace("_mask", "")
+    _, base_stem, _, _ = get_canonical_busi_id(image_id)
+    target_base = base_stem.lower().strip()
+
+    matching_masks: List[Path] = []
 
     for root in search_roots:
         if not root.exists():
             continue
 
-        # Look for matching mask files
-        matching_masks = [
-            f for f in root.rglob("*.png")
-            if "_mask" in f.stem.lower() and clean_id in f.stem.lower()
-        ]
+        for f in root.rglob("*.png"):
+            stem_low = f.stem.lower()
+            if "_mask" in stem_low:
+                candidate_base = re.sub(r"_mask.*$", "", stem_low, flags=re.IGNORECASE).strip()
+                if candidate_base == target_base:
+                    if f not in matching_masks:
+                        matching_masks.append(f)
 
         if matching_masks:
-            combined: Optional[np.ndarray] = None
-            for mp in sorted(matching_masks):
-                with Image.open(mp) as img:
-                    arr = np.array(img.convert("L"))
-                    bin_mask = (arr > 0).astype(np.uint8) * 255
-                    if combined is None:
-                        combined = bin_mask
-                    else:
-                        if combined.shape == bin_mask.shape:
-                            combined = np.maximum(combined, bin_mask)
+            break
 
-            if combined is not None:
-                # Resize to 256x256 with nearest neighbor to preserve binary edges
-                resized_gt = cv2.resize(combined, (256, 256), interpolation=cv2.INTER_NEAREST)
-                return (resized_gt > 0).astype(np.uint8) * 255
+    if not matching_masks:
+        logger.warning(f"No ground-truth mask found for '{image_id}' (canonical stem: '{base_stem}').")
+        return None, None, []
 
+    combined: Optional[np.ndarray] = None
+    for mp in sorted(matching_masks):
+        try:
+            with Image.open(mp) as img:
+                arr = np.array(img.convert("L"))
+                bin_mask = (arr > 0).astype(np.uint8) * 255
+                if combined is None:
+                    combined = bin_mask
+                else:
+                    if combined.shape == bin_mask.shape:
+                        combined = np.maximum(combined, bin_mask)
+        except Exception as e:
+            logger.error(f"Error loading mask {mp}: {e}")
+
+    if combined is not None:
+        resized_gt = cv2.resize(combined, (256, 256), interpolation=cv2.INTER_NEAREST)
+        final_mask = (resized_gt > 0).astype(np.uint8) * 255
+        mask_id = ", ".join(m.name for m in matching_masks)
+        logger.info(f"Matched {len(matching_masks)} ground-truth mask(s) for '{image_id}': {mask_id}")
+        return final_mask, mask_id, matching_masks
+
+    return None, None, []
+
+
+def locate_original_uncompressed(image_id: str, search_roots: List[Path]) -> Optional[Path]:
+    """Locates the original uncompressed source image for image_id across search roots."""
+    _, base_stem, _, _ = get_canonical_busi_id(image_id)
+    target_base = base_stem.lower().strip()
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+
+        for f in root.rglob("*.png"):
+            stem_low = f.stem.lower()
+            if "_mask" not in stem_low and stem_low == target_base:
+                return f
+
+    logger.warning(f"Original uncompressed image not found for '{image_id}' (canonical stem: '{base_stem}').")
     return None
 
 

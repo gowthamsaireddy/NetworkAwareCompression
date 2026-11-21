@@ -15,9 +15,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from common.config import get_receiver_config
-from common.results_manager import ExperimentRecord, ResultsManager
+from common.results_manager import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INCOMPLETE,
+    ExperimentRecord,
+    ResultsManager,
+)
 from receiver.batch_segmentation_worker import BatchSegmentationWorker
 from receiver.model_manager import ModelManager
+from receiver.segmentation_metrics import get_canonical_busi_id
 from ui.receiver.dashboard_view import ReceiverDashboardView
 from ui.receiver.evaluation_view import ReceiverEvaluationView
 from ui.receiver.image_view import ReceiverImageView
@@ -232,11 +239,15 @@ class ReceiverMainWindow(QMainWindow):
             )
             tx_time_val = rx_time_sec if rx_time_sec > 0.0 else None
             thru_val = rx_throughput_kbps if rx_throughput_kbps > 0.0 else None
+            orig_id, _, cat, orig_fn = get_canonical_busi_id(metadata.image_id)
 
             rec = ExperimentRecord(
                 experiment_id=metadata.experiment_id,
                 timestamp=timestamp,
                 image_id=metadata.image_id,
+                original_image_id=orig_id,
+                original_image_filename=orig_fn,
+                image_category=cat,
                 compression_quality=metadata.compression_quality,
                 original_file_size=metadata.original_file_size,
                 compressed_file_size=metadata.compressed_file_size,
@@ -252,7 +263,9 @@ class ReceiverMainWindow(QMainWindow):
                 checksum_verified=verified,
                 dice_coefficient=None,
                 iou=None,
-                notes="Received via TCP",
+                ground_truth_status="UNVERIFIED",
+                experiment_status=STATUS_INCOMPLETE,
+                notes="Received via TCP (Pending segmentation)",
             )
             self.results_manager.record_or_update_experiment(rec)
             self.results_view.load_records()
@@ -361,11 +374,17 @@ class ReceiverMainWindow(QMainWindow):
                 if cached_thru > 0.0:
                     thru_val = cached_thru
 
+            orig_id, _, cat, orig_fn = get_canonical_busi_id(metadata.image_id)
+            gt_stat = "MATCHED" if (dice is not None) else "MISSING_GT"
+            exp_stat = STATUS_COMPLETED if (dice is not None and psnr is not None) else STATUS_INCOMPLETE
+
             rec = ExperimentRecord(
                 experiment_id=metadata.experiment_id,
                 timestamp=now_str,
                 image_id=metadata.image_id,
-                image_category=metadata.image_category,
+                original_image_id=orig_id,
+                original_image_filename=orig_fn,
+                image_category=cat,
                 compression_method=metadata.compression_mode,
                 compression_quality=metadata.compression_quality,
                 region_adaptive_margin=metadata.region_adaptive_margin,
@@ -384,6 +403,9 @@ class ReceiverMainWindow(QMainWindow):
                 checksum_verified=True,
                 dice_coefficient=dice,
                 iou=iou,
+                ground_truth_status=gt_stat,
+                experiment_status=exp_stat,
+                completion_time=now_str,
                 notes="Receiver evaluated",
             )
             self.results_manager.record_or_update_experiment(rec)

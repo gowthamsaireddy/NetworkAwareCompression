@@ -20,9 +20,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from common.config import DATA_DIR
 from common.logging_config import setup_logger
-from common.results_manager import ExperimentRecord, ResultsManager
+from common.results_manager import (
+    STATUS_COMPLETED,
+    STATUS_INCOMPLETE,
+    ExperimentRecord,
+    ResultsManager,
+)
 from receiver.segmentation import SegmentationEngine, SegmentationResult
-from receiver.segmentation_metrics import evaluate_segmentation
+from receiver.segmentation_metrics import evaluate_segmentation, get_canonical_busi_id
 from sender.image_metrics import calculate_psnr, calculate_ssim
 from shared.metadata import TransmissionMetadata
 
@@ -59,7 +64,7 @@ class BatchSegmentationWorker(QThread):
 
         logger.info(f"Starting background batch segmentation across {total} received images...")
 
-        # 1. Pre-index masks and original uncompressed images ONCE to eliminate thousands of rglob disk searches
+        # 1. Pre-index masks and original uncompressed images ONCE using canonical base stems
         search_roots = [
             DATA_DIR / "BUSI",
             DATA_DIR / "BUSI" / "benign",
@@ -77,7 +82,7 @@ class BatchSegmentationWorker(QThread):
             for f in root.rglob("*.png"):
                 stem_lower = f.stem.lower()
                 if "_mask" in stem_lower:
-                    base = re.sub(r"_mask.*$", "", f.stem, flags=re.IGNORECASE).lower().strip()
+                    base = re.sub(r"_mask.*$", "", stem_lower, flags=re.IGNORECASE).strip()
                     mask_map.setdefault(base, []).append(f)
                 else:
                     orig_map[stem_lower] = f
@@ -102,9 +107,10 @@ class BatchSegmentationWorker(QThread):
             if not success or result is None:
                 continue
 
-            # Instant O(1) in-memory ground-truth lookup
-            clean_name = Path(metadata.image_id).stem.lower().replace("_mask", "").strip()
-            matching_masks = mask_map.get(clean_name, [])
+            # Canonical O(1) in-memory ground-truth lookup
+            orig_id, base_stem, cat, orig_fn = get_canonical_busi_id(metadata.image_id)
+            target_key = base_stem.lower().strip()
+            matching_masks = mask_map.get(target_key, [])
 
             dice_val: Optional[float] = None
             iou_val: Optional[float] = None
@@ -129,8 +135,8 @@ class BatchSegmentationWorker(QThread):
                     if iou_val is not None:
                         ious.append(iou_val)
 
-            # Instant O(1) fidelity lookup
-            orig_p = orig_map.get(clean_name)
+            # Canonical O(1) fidelity lookup
+            orig_p = orig_map.get(target_key)
             psnr_val, ssim_val = None, None
             if orig_p and orig_p.exists() and save_path.exists():
                 try:
@@ -161,11 +167,20 @@ class BatchSegmentationWorker(QThread):
                 else 1.0
             )
 
+            gt_stat = "MATCHED" if matching_masks else "MISSING_GT"
+            exp_stat = (
+                STATUS_COMPLETED
+                if (dice_val is not None and psnr_val is not None)
+                else STATUS_INCOMPLETE
+            )
+
             rec = ExperimentRecord(
                 experiment_id=metadata.experiment_id,
                 timestamp=now_str,
                 image_id=metadata.image_id,
-                image_category=metadata.image_category,
+                original_image_id=orig_id,
+                original_image_filename=orig_fn,
+                image_category=cat,
                 compression_method=metadata.compression_mode,
                 compression_quality=metadata.compression_quality,
                 region_adaptive_margin=metadata.region_adaptive_margin,
@@ -184,6 +199,9 @@ class BatchSegmentationWorker(QThread):
                 checksum_verified=True,
                 dice_coefficient=dice_val,
                 iou=iou_val,
+                ground_truth_status=gt_stat,
+                experiment_status=exp_stat,
+                completion_time=now_str,
                 inference_time_ms=result.inference_time_ms,
                 notes=f"Batch evaluated: {metadata.compression_mode}",
             )

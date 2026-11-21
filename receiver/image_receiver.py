@@ -48,11 +48,11 @@ class ImageReceiverManager:
             if isinstance(e, OSError):
                 raise
 
-        # Sanitize filenames to prevent path traversal
+        # Sanitize filenames to prevent path traversal while preserving parentheses in image ids
         clean_img_id = metadata.image_id.replace("..", "_").replace("/", "_").replace("\\", "_")
         safe_img_id = re.sub(r"[^\w\s\(\)\.-]", "_", clean_img_id).strip()
         clean_exp_id = metadata.experiment_id.replace("..", "_").replace("/", "_").replace("\\", "_")
-        safe_exp_id = re.sub(r"[^\w\.-]", "_", clean_exp_id).strip()
+        safe_exp_id = re.sub(r"[^\w\s\(\)\.-]", "_", clean_exp_id).strip()
         filename = f"{safe_img_id}_Q{metadata.compression_quality}_{safe_exp_id}.jpg"
 
         target_path = (self.storage_dir / filename).resolve()
@@ -62,6 +62,14 @@ class ImageReceiverManager:
 
         with open(target_path, "wb") as f:
             f.write(image_bytes)
+
+        # Write metadata JSON sidecar to preserve 100% exact metadata across restarts
+        meta_sidecar = target_path.with_suffix(".json")
+        try:
+            with open(meta_sidecar, "w", encoding="utf-8") as f_meta:
+                f_meta.write(metadata.to_json())
+        except Exception:
+            pass
 
         item = ReceivedImageItem(
             image_id=metadata.image_id,

@@ -37,7 +37,13 @@ import numpy as np
 
 from common.config import DATA_DIR, EXPERIMENTS_DIR
 from common.logging_config import setup_logger
-from common.results_manager import ExperimentRecord, ResultsManager
+from common.results_manager import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    ExperimentRecord,
+    ResultsManager,
+)
+from receiver.segmentation_metrics import get_canonical_busi_id
 from sender.compression import CompressionResult, ImageCompressor
 from sender.dataset_manager import DatasetItem, DatasetManager
 from sender.network_control import (
@@ -410,10 +416,13 @@ class AutomatedExperimentRunner:
 
                         # --- Step C: Prepare transmission metadata ---
                         sha_val = compute_sha256(comp_bytes)
+                        orig_id, _, cat, orig_fn = get_canonical_busi_id(item.image_id)
                         meta = TransmissionMetadata(
                             protocol_version=PROTOCOL_VERSION,
                             experiment_id=unique_exp_id,
                             image_id=item.image_id,
+                            original_image_id=orig_id,
+                            original_image_filename=orig_fn,
                             compression_quality=cfg.quality,
                             image_width=img_w,
                             image_height=img_h,
@@ -432,12 +441,14 @@ class AutomatedExperimentRunner:
                         report: TransmissionReport = self.tcp_client.send_image(meta, comp_bytes)
 
                         theo_time = compute_theoretical_transmission_time(comp_size, bw_bps)
-                        status_str = "SUCCESS" if report.is_success else "FAILED"
+                        status_str = STATUS_COMPLETED if report.is_success else STATUS_FAILED
 
                         record = ExperimentRecord(
                             experiment_id=unique_exp_id,
                             timestamp=report.timestamp,
                             image_id=item.image_id,
+                            original_image_id=orig_id,
+                            original_image_filename=orig_fn,
                             image_category=item.category,
                             compression_method=cfg.method,
                             compression_quality=cfg.quality,
@@ -468,8 +479,10 @@ class AutomatedExperimentRunner:
                             checksum_verified=report.checksum_verified,
                             dice_coefficient=report.dice,
                             iou=report.iou,
+                            ground_truth_status="MATCHED" if report.dice is not None else "UNVERIFIED",
                             experiment_status=status_str,
                             error_message=report.error_message,
+                            completion_time=report.timestamp,
                             transmission_mode="AUTOMATED_ALL",
                             notes=f"Auto Run: {run_id} | Config: {cfg.config_id} | Profile: {prof.name}",
                         )

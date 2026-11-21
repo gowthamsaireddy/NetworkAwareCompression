@@ -18,6 +18,13 @@ from typing import Any, List, Optional, Tuple, Union
 from common.config import EXPERIMENTS_DIR
 from common.logging_config import setup_logger
 
+# Experiment lifecycle states
+STATUS_PENDING = "PENDING"
+STATUS_RUNNING = "RUNNING"
+STATUS_COMPLETED = "COMPLETED"
+STATUS_INCOMPLETE = "INCOMPLETE"
+STATUS_FAILED = "FAILED"
+
 logger = setup_logger("ResultsManager")
 
 
@@ -64,12 +71,19 @@ class ExperimentRecord:
     inference_time_ms: Optional[float] = None  # Receiver-side U-Net inference duration
     end_to_end_time_ms: Optional[float] = None  # Total pipeline elapsed time
     ground_truth_id: Optional[str] = None  # Matched mask file identifier
-    experiment_status: str = "SUCCESS"  # SUCCESS, FAILED, TIMEOUT, CHECKSUM_MISMATCH
+    experiment_status: str = STATUS_COMPLETED  # PENDING, RUNNING, COMPLETED, INCOMPLETE, FAILED
     error_message: Optional[str] = None
     software_version: Optional[str] = "1.1.0"
     model_version: Optional[str] = "unet_mgda_v1"
-    transmission_mode: str = "MANUAL"  # MANUAL, BATCH
+    transmission_mode: str = "MANUAL"  # MANUAL, BATCH, AUTOMATED_ALL
     artifact_path: Optional[str] = None
+
+    # Image-Wise Tracking & Research Integrity Fields
+    original_image_id: Optional[str] = None  # Persistent key (e.g. 'benign/benign (1)')
+    original_image_filename: Optional[str] = None  # e.g. 'benign (1).png'
+    ground_truth_status: Optional[str] = None  # MATCHED, MISSING_GT, UNVERIFIED
+    start_time: Optional[str] = None
+    completion_time: Optional[str] = None
 
     def __post_init__(self):
         # Auto-compute size reduction percentage if not provided
@@ -77,7 +91,18 @@ class ExperimentRecord:
             reduction = ((self.original_file_size - self.compressed_file_size) / self.original_file_size) * 100.0
             self.size_reduction_pct = max(0.0, round(reduction, 2))
 
-        # Auto-detect image category from image_id if not explicitly specified
+        # Auto-extract canonical original image ID and filename
+        if not self.original_image_id or not self.original_image_filename:
+            from receiver.segmentation_metrics import get_canonical_busi_id
+            orig_id, _, cat, orig_fn = get_canonical_busi_id(self.image_id)
+            if not self.original_image_id:
+                self.original_image_id = orig_id
+            if not self.original_image_filename:
+                self.original_image_filename = orig_fn
+            if self.image_category is None:
+                self.image_category = cat
+
+        # Auto-detect image category if still missing
         if self.image_category is None and self.image_id:
             low = self.image_id.lower()
             if "benign" in low:
@@ -86,6 +111,26 @@ class ExperimentRecord:
                 self.image_category = "malignant"
             elif "normal" in low:
                 self.image_category = "normal"
+
+        # Determine ground_truth_status
+        if self.ground_truth_status is None:
+            if self.dice_coefficient is not None and self.iou is not None:
+                self.ground_truth_status = "MATCHED"
+            elif self.ground_truth_id:
+                self.ground_truth_status = "MATCHED"
+            else:
+                self.ground_truth_status = "MISSING_GT" if self.experiment_status == STATUS_COMPLETED else "UNVERIFIED"
+
+        # Lifecycle status verification
+        if self.experiment_status not in (STATUS_PENDING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_INCOMPLETE, STATUS_FAILED):
+            # Normalize legacy statuses
+            if self.experiment_status in ("SUCCESS", "COMPLETED"):
+                if self.dice_coefficient is not None or self.psnr is not None:
+                    self.experiment_status = STATUS_COMPLETED
+                else:
+                    self.experiment_status = STATUS_INCOMPLETE
+            else:
+                self.experiment_status = STATUS_FAILED
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -136,6 +181,11 @@ INSERT_COLUMNS = [
     "transmission_mode",
     "artifact_path",
     "notes",
+    "original_image_id",
+    "original_image_filename",
+    "ground_truth_status",
+    "start_time",
+    "completion_time",
 ]
 
 SCHEMA_DEFINITIONS = [
@@ -175,13 +225,18 @@ SCHEMA_DEFINITIONS = [
     ("dice_coefficient", "REAL"),
     ("iou", "REAL"),
     ("ground_truth_id", "TEXT"),
-    ("experiment_status", "TEXT DEFAULT 'SUCCESS'"),
+    ("experiment_status", "TEXT DEFAULT 'COMPLETED'"),
     ("error_message", "TEXT"),
     ("software_version", "TEXT"),
     ("model_version", "TEXT"),
     ("transmission_mode", "TEXT DEFAULT 'MANUAL'"),
     ("artifact_path", "TEXT"),
     ("notes", "TEXT"),
+    ("original_image_id", "TEXT"),
+    ("original_image_filename", "TEXT"),
+    ("ground_truth_status", "TEXT"),
+    ("start_time", "TEXT"),
+    ("completion_time", "TEXT"),
 ]
 
 
@@ -196,6 +251,51 @@ class ResultsManager:
         self._init_sqlite()
         self._init_csv()
         self._backfill_missing_telemetry()
+        self._repair_and_backfill_records()
+
+    def _repair_and_backfill_records(self) -> None:
+        """Repairs legacy/corrupted records and backfills original_image_id, filename, and lifecycle status."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            from receiver.segmentation_metrics import get_canonical_busi_id
+            with conn:
+                cursor = conn.cursor()
+
+                # 1. Clean up phantom corrupted rows where ID was regex-mangled and metrics were empty
+                cursor.execute(
+                    "DELETE FROM experiments WHERE (experiment_id LIKE 'BG70_Satellite_%' OR experiment_id LIKE 'BG50_Satellite_%') AND dice_coefficient IS NULL AND psnr IS NULL"
+                )
+                deleted_phantoms = cursor.rowcount
+                if deleted_phantoms > 0:
+                    logger.info(f"Cleaned up {deleted_phantoms} phantom unverified records.")
+
+                # 2. Backfill canonical original_image_id, filename, and ground_truth_status
+                cursor.execute("SELECT id, image_id, dice_coefficient, psnr, experiment_status FROM experiments")
+                rows = cursor.fetchall()
+                for row_id, img_id, dice_val, psnr_val, cur_status in rows:
+                    orig_id, _, cat, orig_fn = get_canonical_busi_id(img_id)
+                    gt_stat = "MATCHED" if (dice_val is not None) else "MISSING_GT"
+                    new_status = STATUS_COMPLETED if (dice_val is not None and psnr_val is not None) else (
+                        STATUS_INCOMPLETE if dice_val is None and psnr_val is None else STATUS_COMPLETED
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE experiments SET
+                            original_image_id = COALESCE(original_image_id, ?),
+                            original_image_filename = COALESCE(original_image_filename, ?),
+                            ground_truth_status = COALESCE(ground_truth_status, ?),
+                            experiment_status = ?
+                        WHERE id = ?
+                        """,
+                        (orig_id, orig_fn, gt_stat, new_status, row_id),
+                    )
+        except Exception as e:
+            logger.warning(f"Could not backfill original image tracking fields: {e}")
+        finally:
+            conn.close()
+
+        # Synchronize CSV once to update headers and values
+        self._sync_csv()
 
     def _backfill_missing_telemetry(self) -> None:
         """Backfill transmission time and throughput for historical records where NULL."""

@@ -15,8 +15,11 @@ from receiver.segmentation_metrics import (
     compute_iou,
     create_comparative_overlay,
     evaluate_segmentation,
+    get_canonical_busi_id,
     locate_ground_truth_mask,
+    locate_original_uncompressed,
 )
+from ui.receiver.results_view import calculate_pareto_score
 
 
 class SimpleUNetMock(nn.Module):
@@ -171,6 +174,64 @@ class TestSegmentationMetrics(unittest.TestCase):
         overlay = create_comparative_overlay(base, gt, pred)
         self.assertEqual(overlay.shape, (256, 256, 3))
         self.assertEqual(overlay.dtype, np.uint8)
+
+    def test_canonical_busi_id_parsing(self):
+        cases = [
+            ("benign/benign (1)", "benign/benign (1)", "benign (1)", "benign", "benign (1).png"),
+            ("benign (1)", "benign/benign (1)", "benign (1)", "benign", "benign (1).png"),
+            ("benign_benign (148)_Q90_RUN_20261121_123652_ROI", "benign/benign (148)", "benign (148)", "benign", "benign (148).png"),
+            ("BG70_Satellite_benign_benign__148_", "benign/benign (148)", "benign (148)", "benign", "benign (148).png"),
+            ("malignant/malignant (23)", "malignant/malignant (23)", "malignant (23)", "malignant", "malignant (23).png"),
+            ("normal/normal (5)", "normal/normal (5)", "normal (5)", "normal", "normal (5).png"),
+        ]
+        for raw, exp_id, exp_stem, exp_cat, exp_fn in cases:
+            orig_id, stem, cat, fn = get_canonical_busi_id(raw)
+            self.assertEqual(orig_id, exp_id)
+            self.assertEqual(stem, exp_stem)
+            self.assertEqual(cat, exp_cat)
+            self.assertEqual(fn, exp_fn)
+
+    def test_ground_truth_and_orig_locating(self):
+        from common.config import DATA_DIR
+        search_roots = [DATA_DIR / "BUSI"]
+
+        # 1. Single mask image
+        gt_mask, mask_id, paths = locate_ground_truth_mask("benign/benign (1)", search_roots)
+        self.assertIsNotNone(gt_mask)
+        self.assertEqual(gt_mask.shape, (256, 256))
+        self.assertEqual(len(paths), 1)
+        self.assertIn("benign (1)_mask.png", mask_id)
+
+        orig_p = locate_original_uncompressed("benign/benign (1)", search_roots)
+        self.assertIsNotNone(orig_p)
+        self.assertEqual(orig_p.name, "benign (1).png")
+
+        # 2. Multi-mask image (benign (100) has _mask and _mask_1)
+        gt_mask_multi, mask_id_m, paths_m = locate_ground_truth_mask("benign/benign (100)", search_roots)
+        self.assertIsNotNone(gt_mask_multi)
+        self.assertEqual(len(paths_m), 2)
+        self.assertIn("benign (100)_mask.png", mask_id_m)
+        self.assertIn("benign (100)_mask_1.png", mask_id_m)
+
+        # 3. Nonexistent image must return None per zero-dummy data policy
+        gt_none, _, paths_none = locate_ground_truth_mask("nonexistent_phantom_img_9999", search_roots)
+        self.assertIsNone(gt_none)
+        self.assertEqual(len(paths_none), 0)
+
+    def test_pareto_tradeoff_score_calculation(self):
+        # High quality, moderate compression
+        score_high = calculate_pareto_score(
+            dice=0.92, iou=0.85, ssim=0.98, psnr=42.0, comp_ratio=8.5, tx_time=0.15
+        )
+        self.assertGreater(score_high, 80.0)
+        self.assertLessEqual(score_high, 100.0)
+
+        # Poor segmentation should penalize the score heavily
+        score_low = calculate_pareto_score(
+            dice=0.20, iou=0.10, ssim=0.60, psnr=25.0, comp_ratio=25.0, tx_time=0.01
+        )
+        self.assertLess(score_low, 60.0)
+        self.assertGreater(score_high, score_low)
 
 
 if __name__ == "__main__":

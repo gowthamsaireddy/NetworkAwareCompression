@@ -25,6 +25,19 @@ class TransmissionMetadata:
     compression_model_version: Optional[str] = None
     image_category: Optional[str] = None  # benign, malignant, normal
     client_send_timestamp: Optional[float] = None
+    original_image_id: Optional[str] = None  # e.g., 'benign/benign (1)'
+    original_image_filename: Optional[str] = None  # e.g., 'benign (1).png'
+
+    def __post_init__(self):
+        if not self.original_image_id or not self.original_image_filename:
+            from receiver.segmentation_metrics import get_canonical_busi_id
+            orig_id, _, cat, orig_fn = get_canonical_busi_id(self.image_id)
+            if not self.original_image_id:
+                self.original_image_id = orig_id
+            if not self.original_image_filename:
+                self.original_image_filename = orig_fn
+            if not self.image_category:
+                self.image_category = cat
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -51,6 +64,8 @@ class TransmissionMetadata:
             compression_model_version=data.get("compression_model_version"),
             image_category=data.get("image_category"),
             client_send_timestamp=data.get("client_send_timestamp"),
+            original_image_id=data.get("original_image_id"),
+            original_image_filename=data.get("original_image_filename"),
         )
 
     @classmethod

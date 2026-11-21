@@ -142,6 +142,8 @@ class TestImageSelectionDialog(QDialog):
         self.btn_default_10.setObjectName("SecondaryBtn")
         self.btn_first_25 = QPushButton("Use First 25")
         self.btn_first_25.setObjectName("SecondaryBtn")
+        self.btn_first_48 = QPushButton("Use First 48")
+        self.btn_first_48.setObjectName("SecondaryBtn")
         self.btn_first_50 = QPushButton("Use First 50")
         self.btn_first_50.setObjectName("SecondaryBtn")
         self.btn_select_all = QPushButton(f"Select All ({len(self.all_test_items)})")
@@ -151,6 +153,7 @@ class TestImageSelectionDialog(QDialog):
 
         btn_bar.addWidget(self.btn_default_10)
         btn_bar.addWidget(self.btn_first_25)
+        btn_bar.addWidget(self.btn_first_48)
         btn_bar.addWidget(self.btn_first_50)
         btn_bar.addWidget(self.btn_select_all)
         btn_bar.addWidget(self.btn_clear_all)
@@ -198,6 +201,7 @@ class TestImageSelectionDialog(QDialog):
 
         self.btn_default_10.clicked.connect(lambda: self._select_n(10))
         self.btn_first_25.clicked.connect(lambda: self._select_n(25))
+        self.btn_first_48.clicked.connect(lambda: self._select_n(48))
         self.btn_first_50.clicked.connect(lambda: self._select_n(50))
         self.btn_select_all.clicked.connect(lambda: self._select_n(len(self.all_test_items)))
         self.btn_clear_all.clicked.connect(self._clear_all)

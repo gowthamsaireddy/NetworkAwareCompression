@@ -23,7 +23,9 @@ from receiver.segmentation import SegmentationResult
 from receiver.segmentation_metrics import (
     create_comparative_overlay,
     evaluate_segmentation,
+    get_canonical_busi_id,
     locate_ground_truth_mask,
+    locate_original_uncompressed,
 )
 from shared.constants import STATUS_NOT_CALCULATED
 from shared.metadata import TransmissionMetadata
@@ -156,8 +158,8 @@ class ReceiverEvaluationView(QWidget):
         q_pred = QImage(result.predicted_mask.data, w, h, w, QImage.Format.Format_Grayscale8)
         self.pred_box.set_pixmap(QPixmap.fromImage(q_pred), caption="256 × 256 Binary Prediction")
 
-        # 3. Locate Ground-Truth Mask
-        gt_mask = locate_ground_truth_mask(metadata.image_id, self.search_roots)
+        # 3. Locate Ground-Truth Mask(s) using robust canonical matching
+        gt_mask, mask_id, mask_paths = locate_ground_truth_mask(metadata.image_id, self.search_roots)
 
         # 4. Search for Original Uncompressed Image
         self._load_original_uncompressed(metadata.image_id)
@@ -170,12 +172,13 @@ class ReceiverEvaluationView(QWidget):
             # Ground truth located
             gh, gw = gt_mask.shape
             q_gt = QImage(gt_mask.data, gw, gh, gw, QImage.Format.Format_Grayscale8)
-            self.gt_box.set_pixmap(QPixmap.fromImage(q_gt), caption="256 × 256 Binary Ground Truth")
+            caption_str = f"256 × 256 Binary Ground Truth ({len(mask_paths)} mask{'s' if len(mask_paths) > 1 else ''})"
+            self.gt_box.set_pixmap(QPixmap.fromImage(q_gt), caption=caption_str)
 
             dice, iou, status = evaluate_segmentation(gt_mask, result.predicted_mask)
             self.card_dice.set_value(f"{dice:.4f}" if dice is not None else STATUS_NOT_CALCULATED)
             self.card_iou.set_value(f"{iou:.4f}" if iou is not None else STATUS_NOT_CALCULATED)
-            self.card_gt_match.set_value("Ground Truth Matched")
+            self.card_gt_match.set_value(f"GT Matched ({len(mask_paths)})")
 
             # Comparative overlay
             comp_overlay = create_comparative_overlay(result.processed_image, gt_mask, result.predicted_mask)
@@ -236,20 +239,7 @@ class ReceiverEvaluationView(QWidget):
             return None, None
 
     def _load_original_uncompressed(self, image_id: str):
-        clean_name = Path(image_id).stem.lower()
-        found_orig: Optional[Path] = None
-
-        for root in self.search_roots:
-            if not root.exists():
-                continue
-            candidates = [
-                f for f in root.rglob("*.png")
-                if "_mask" not in f.stem.lower() and clean_name in f.stem.lower()
-            ]
-            if candidates:
-                found_orig = candidates[0]
-                break
-
+        found_orig = locate_original_uncompressed(image_id, self.search_roots)
         self.current_orig_path = found_orig
         if found_orig and found_orig.exists():
             pix = QPixmap(str(found_orig))
