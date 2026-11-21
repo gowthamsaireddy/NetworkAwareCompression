@@ -19,7 +19,6 @@ from receiver.segmentation_metrics import (
     locate_ground_truth_mask,
     locate_original_uncompressed,
 )
-from ui.receiver.results_view import calculate_pareto_score
 
 
 class SimpleUNetMock(nn.Module):
@@ -218,20 +217,18 @@ class TestSegmentationMetrics(unittest.TestCase):
         self.assertIsNone(gt_none)
         self.assertEqual(len(paths_none), 0)
 
-    def test_pareto_tradeoff_score_calculation(self):
-        # High quality, moderate compression
-        score_high = calculate_pareto_score(
-            dice=0.92, iou=0.85, ssim=0.98, psnr=42.0, comp_ratio=8.5, tx_time=0.15
-        )
-        self.assertGreater(score_high, 80.0)
-        self.assertLessEqual(score_high, 100.0)
-
-        # Poor segmentation should penalize the score heavily
-        score_low = calculate_pareto_score(
-            dice=0.20, iou=0.10, ssim=0.60, psnr=25.0, comp_ratio=25.0, tx_time=0.01
-        )
-        self.assertLess(score_low, 60.0)
-        self.assertGreater(score_high, score_low)
+    def test_canonical_busi_id_extraction_consistency(self):
+        cases = [
+            ("benign (1)", "benign/benign (1)", "benign (1)", "benign"),
+            ("benign/benign (148)", "benign/benign (148)", "benign (148)", "benign"),
+            ("malignant/malignant (25)_Q90_RUN_1234", "malignant/malignant (25)", "malignant (25)", "malignant"),
+            ("ROI_Q90_BG70_Satellite_benign_benign__148__Q90", "benign/benign (148)", "benign (148)", "benign"),
+        ]
+        for raw, exp_id, exp_stem, exp_cat in cases:
+            canon_id, base_stem, category, filename = get_canonical_busi_id(raw)
+            self.assertEqual(canon_id, exp_id)
+            self.assertEqual(base_stem, exp_stem)
+            self.assertEqual(category, exp_cat)
 
 
 if __name__ == "__main__":

@@ -34,29 +34,60 @@ class SectionHeader(QWidget):
 
 
 class MetricBox(QFrame):
-    """Card widget displaying a single measured metric value and label.
+    """Card widget displaying measured metric values, with primary and secondary details.
 
     Strict zero-dummy policy: default text is 'No data available' or 'Not calculated'.
+    Auto-adjusts font size and wraps text to prevent truncation on any display resolution.
     """
 
-    def __init__(self, label: str, default_value: str = "No data available", parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        label: str,
+        default_value: str = "No data available",
+        subtitle: str = "",
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self.setObjectName("MetricBox")
+        self.setMinimumHeight(78)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(2)
 
         self.label_lbl = QLabel(label.upper())
         self.label_lbl.setObjectName("MetricLabel")
 
         self.val_lbl = QLabel(default_value)
         self.val_lbl.setObjectName("MetricValue")
+        self.val_lbl.setWordWrap(True)
+        self._apply_val_font(default_value)
+
+        self.sub_lbl = QLabel(subtitle)
+        self.sub_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
+        self.sub_lbl.setWordWrap(True)
+        if not subtitle:
+            self.sub_lbl.hide()
 
         layout.addWidget(self.label_lbl)
         layout.addWidget(self.val_lbl)
+        layout.addWidget(self.sub_lbl)
 
-    def set_value(self, value: str) -> None:
+    def _apply_val_font(self, text: str, color: str = "#38bdf8") -> None:
+        if len(text) > 22:
+            self.val_lbl.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {color};")
+        elif len(text) > 13:
+            self.val_lbl.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {color};")
+        else:
+            self.val_lbl.setStyleSheet(f"font-size: 20px; font-weight: 700; color: {color};")
+
+    def set_value(self, value: str, subtitle: Optional[str] = None, color: str = "#38bdf8") -> None:
         self.val_lbl.setText(value)
+        self._apply_val_font(value, color=color)
+        if subtitle is not None:
+            self.sub_lbl.setText(subtitle)
+            self.sub_lbl.setVisible(bool(subtitle))
 
 
 class ResizableImageLabel(QLabel):
@@ -106,19 +137,25 @@ class ResizableImageLabel(QLabel):
         return QSize(256, 256)
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(160, 160)
+        return QSize(140, 140)
 
 
 class ImagePreviewBox(QFrame):
-    """Dedicated widget for displaying ultrasound images or placeholders with responsive scaling."""
+    """Dedicated widget for displaying ultrasound images or placeholders with responsive scaling.
+
+    Guarantees that the caption label has its own dedicated physical footer container separated from
+    the image canvas, preventing any text-over-image overlap.
+    """
 
     def __init__(self, title: str, placeholder: str = "No data available", parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("CardFrame")
-        self.setMinimumHeight(260)
+        self.setMinimumHeight(280)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("CardTitle")
@@ -128,12 +165,26 @@ class ImagePreviewBox(QFrame):
         self.image_lbl.setStyleSheet(
             "background-color: #0b1120; border: 1px dashed #334155; border-radius: 6px; color: #64748b; font-style: italic;"
         )
-        self.image_lbl.setMinimumSize(180, 180)
+        self.image_lbl.setMinimumSize(160, 160)
         self.image_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        # Dedicated footer badge container so caption NEVER overlays the image canvas
         self.caption_lbl = QLabel("")
-        self.caption_lbl.setObjectName("MetricLabel")
+        self.caption_lbl.setObjectName("ImageCaptionLabel")
         self.caption_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.caption_lbl.setWordWrap(True)
+        self.caption_lbl.setStyleSheet(
+            "QLabel#ImageCaptionLabel {"
+            "    background-color: #0b1120;"
+            "    border: 1px solid #1e293b;"
+            "    border-radius: 4px;"
+            "    padding: 3px 8px;"
+            "    color: #38bdf8;"
+            "    font-size: 11px;"
+            "    font-weight: 600;"
+            "    min-height: 22px;"
+            "}"
+        )
 
         layout.addWidget(self.title_lbl)
         layout.addWidget(self.image_lbl, stretch=1)
@@ -146,4 +197,3 @@ class ImagePreviewBox(QFrame):
     def clear_image(self, message: str = "No data available") -> None:
         self.image_lbl.clear_pixmap(message)
         self.caption_lbl.setText("")
-
