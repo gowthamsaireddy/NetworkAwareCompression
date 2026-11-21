@@ -340,7 +340,7 @@ class ResultsManager:
                 row_dict = {k: r.get(k) for k in self.csv_header}
                 dict_writer.writerow(row_dict)
 
-    def record_or_update_experiment(self, record: ExperimentRecord) -> None:
+    def record_or_update_experiment(self, record: ExperimentRecord, sync_csv: bool = True) -> None:
         """Inserts record if not existing, or updates non-None fields if already recorded."""
         conn = sqlite3.connect(self.db_path)
         try:
@@ -377,6 +377,11 @@ class ResultsManager:
         finally:
             conn.close()
 
+        if sync_csv:
+            self._sync_csv()
+
+    def sync_csv(self) -> None:
+        """Explicitly synchronize entire CSV log with SQLite state."""
         self._sync_csv()
 
     def update_evaluation_metrics(

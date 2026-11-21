@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -63,15 +64,56 @@ class ReceiverSegmentationView(QWidget):
         # Control row
         ctrl_frame = QFrame()
         ctrl_frame.setObjectName("CardFrame")
-        ctrl_layout = QHBoxLayout(ctrl_frame)
+        ctrl_vbox = QVBoxLayout(ctrl_frame)
+        ctrl_vbox.setSpacing(10)
 
+        btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Run Segmentation on Selected Image")
         self.run_batch_btn = QPushButton("Run Batch Inference on All Received Images")
         self.run_batch_btn.setObjectName("SecondaryBtn")
+        self.cancel_batch_btn = QPushButton("Cancel Batch")
+        self.cancel_batch_btn.setObjectName("DangerBtn")
+        self.cancel_batch_btn.setVisible(False)
 
-        ctrl_layout.addWidget(self.run_btn)
-        ctrl_layout.addWidget(self.run_batch_btn)
-        ctrl_layout.addStretch()
+        btn_row.addWidget(self.run_btn)
+        btn_row.addWidget(self.run_batch_btn)
+        btn_row.addWidget(self.cancel_batch_btn)
+        btn_row.addStretch()
+        ctrl_vbox.addLayout(btn_row)
+
+        # Batch progress container
+        self.progress_container = QWidget()
+        prog_layout = QVBoxLayout(self.progress_container)
+        prog_layout.setContentsMargins(0, 0, 0, 0)
+        prog_layout.setSpacing(4)
+
+        self.batch_status_lbl = QLabel("Ready for segmentation")
+        self.batch_status_lbl.setStyleSheet("font-size: 12px; color: #475569; font-weight: 500;")
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setRange(0, 100)
+        self.batch_progress_bar.setValue(0)
+        self.batch_progress_bar.setTextVisible(True)
+        self.batch_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                text-align: center;
+                height: 18px;
+                font-size: 11px;
+                font-weight: 600;
+                color: #0F172A;
+                background-color: #F8FAFC;
+            }
+            QProgressBar::chunk {
+                background-color: #2563EB;
+                border-radius: 3px;
+            }
+        """)
+
+        prog_layout.addWidget(self.batch_status_lbl)
+        prog_layout.addWidget(self.batch_progress_bar)
+        self.progress_container.setVisible(False)
+        ctrl_vbox.addWidget(self.progress_container)
 
         layout.addWidget(ctrl_frame)
 
@@ -104,6 +146,39 @@ class ReceiverSegmentationView(QWidget):
         outer_layout.addWidget(scroll_area)
 
         self.run_btn.clicked.connect(self._handle_run_segmentation)
+
+    def set_batch_running(self, running: bool, total: int = 0):
+        """Toggles batch segmentation controls and progress bar visibility."""
+        self.run_btn.setEnabled(not running)
+        self.run_batch_btn.setEnabled(not running)
+        self.cancel_batch_btn.setVisible(running)
+        self.cancel_batch_btn.setEnabled(running)
+        self.progress_container.setVisible(running)
+        if running:
+            self.batch_progress_bar.setRange(0, max(total, 1))
+            self.batch_progress_bar.setValue(0)
+            self.batch_status_lbl.setText(f"Initializing high-throughput batch segmentation for {total} images...")
+        else:
+            self.cancel_batch_btn.setVisible(False)
+
+    def update_batch_progress(
+        self,
+        curr: int,
+        total: int,
+        image_id: str,
+        dice: Optional[float] = None,
+        iou: Optional[float] = None,
+        latency_ms: float = 0.0,
+    ):
+        """Updates batch segmentation progress and telemetry label."""
+        self.batch_progress_bar.setValue(curr)
+        dice_str = f"Dice: {dice:.4f}" if dice is not None else "No GT"
+        iou_str = f"IoU: {iou:.4f}" if iou is not None else ""
+        metrics_info = f" | {dice_str}" + (f", {iou_str}" if iou_str else "")
+        self.batch_status_lbl.setText(
+            f"Segmenting [{curr}/{total}]: {image_id}{metrics_info} ({latency_ms:.1f}ms)"
+        )
+        self.card_latency.set_value(f"{latency_ms:.2f} ms")
 
     def set_active_image(self, image_path: Path, metadata: TransmissionMetadata):
         """Sets active image for segmentation inference."""

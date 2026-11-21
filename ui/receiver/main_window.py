@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 from common.config import get_receiver_config
 from common.results_manager import ExperimentRecord, ResultsManager
+from receiver.batch_segmentation_worker import BatchSegmentationWorker
 from receiver.model_manager import ModelManager
 from ui.receiver.dashboard_view import ReceiverDashboardView
 from ui.receiver.evaluation_view import ReceiverEvaluationView
@@ -42,6 +43,7 @@ class ReceiverMainWindow(QMainWindow):
         self.model_manager = ModelManager(device=self.config.device if self.config.device != "auto" else None)
         self.results_manager = ResultsManager()
         self._rx_telemetry = {}
+        self._batch_worker: Optional[BatchSegmentationWorker] = None
 
         self.init_ui()
         self._auto_load_default_checkpoint()
@@ -164,8 +166,9 @@ class ReceiverMainWindow(QMainWindow):
         # 4. Completed segmentation forwards directly to evaluation view
         self.segmentation_view.segmentation_completed.connect(self._on_segmentation_completed)
 
-        # 5. Batch segmentation requested
+        # 5. Batch segmentation requested & cancelled
         self.segmentation_view.run_batch_btn.clicked.connect(self._on_batch_segmentation_requested)
+        self.segmentation_view.cancel_batch_btn.clicked.connect(self._on_cancel_batch_segmentation)
 
         # 6. Evaluation completion updates dashboard metrics and results table
         self.evaluation_view.evaluation_completed.connect(self._on_evaluation_completed)
@@ -285,6 +288,10 @@ class ReceiverMainWindow(QMainWindow):
         )
 
     def _on_batch_segmentation_requested(self):
+        if self._batch_worker and self._batch_worker.isRunning():
+            QMessageBox.warning(self, "Batch in Progress", "Batch segmentation is already currently running.")
+            return
+
         if not self.image_view.received_items:
             QMessageBox.information(self, "No Images", "No received images available to segment.")
             return
@@ -297,18 +304,39 @@ class ReceiverMainWindow(QMainWindow):
             )
             return
 
-        processed = 0
-        for metadata, save_path in self.image_view.received_items:
-            success, result, msg = self.segmentation_view.engine.run_inference(save_path, metadata.image_id)
-            if success and result is not None:
-                self.evaluation_view.load_evaluation_data(result, metadata, comp_image_path=save_path)
-                processed += 1
+        total_items = len(self.image_view.received_items)
+        self.segmentation_view.set_batch_running(True, total=total_items)
 
+        self._batch_worker = BatchSegmentationWorker(
+            engine=self.segmentation_view.engine,
+            items=self.image_view.received_items,
+            results_manager=self.results_manager,
+            rx_telemetry=getattr(self, "_rx_telemetry", None),
+        )
+        self._batch_worker.progress_updated.connect(self._on_batch_progress_updated)
+        self._batch_worker.batch_finished.connect(self._on_batch_segmentation_finished)
+        self._batch_worker.start()
+
+    def _on_cancel_batch_segmentation(self):
+        if self._batch_worker and self._batch_worker.isRunning():
+            self._batch_worker.stop()
+            self.segmentation_view.batch_status_lbl.setText("Cancelling batch segmentation...")
+
+    def _on_batch_progress_updated(self, curr, total, image_id, dice, iou, latency_ms):
+        self.segmentation_view.update_batch_progress(curr, total, image_id, dice, iou, latency_ms)
+        self.dashboard_view.card_eval.set_value(f"Segmenting: {curr}/{total}")
+
+    def _on_batch_segmentation_finished(self, processed, total, avg_dice, avg_iou, summary):
+        self.segmentation_view.set_batch_running(False)
+        self.dashboard_view.card_eval.set_value(f"Avg Dice: {avg_dice:.4f} | IoU: {avg_iou:.4f}")
+        # Mark results dirty and reload once at batch completion
+        self.results_view.load_records(force=True)
         QMessageBox.information(
             self,
-            "Batch Complete",
-            f"Successfully segmented and evaluated {processed} received images.\nCheck Experiment Results for complete records.",
+            "Batch Segmentation Complete",
+            summary + "\n\nAll results are stored in SQLite and CSV, and ready in Experiment Results.",
         )
+        self._batch_worker = None
 
     def _on_evaluation_completed(self, metadata, dice, iou, psnr=None, ssim=None):
         if dice is not None and iou is not None:
@@ -337,15 +365,19 @@ class ReceiverMainWindow(QMainWindow):
                 experiment_id=metadata.experiment_id,
                 timestamp=now_str,
                 image_id=metadata.image_id,
+                image_category=metadata.image_category,
+                compression_method=metadata.compression_mode,
                 compression_quality=metadata.compression_quality,
+                region_adaptive_margin=metadata.region_adaptive_margin,
+                compression_model_version=metadata.compression_model_version,
                 original_file_size=metadata.original_file_size,
                 compressed_file_size=metadata.compressed_file_size,
                 compression_ratio=ratio,
                 psnr=psnr,
                 ssim=ssim,
-                bandwidth_limit="unshaped",
-                packet_loss_rate=0.0,
-                network_delay_ms=0.0,
+                bandwidth_limit=None,
+                packet_loss_rate=None,
+                network_delay_ms=None,
                 theoretical_transmission_time_sec=None,
                 transmission_time_sec=tx_time_val,
                 measured_throughput_kbps=thru_val,
@@ -355,4 +387,5 @@ class ReceiverMainWindow(QMainWindow):
                 notes="Receiver evaluated",
             )
             self.results_manager.record_or_update_experiment(rec)
-            self.results_view.load_records()
+            # Mark results dirty so opening results tab will reload, without freezing GUI during evaluation
+            self.results_view.mark_dirty()

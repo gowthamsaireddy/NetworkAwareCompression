@@ -24,8 +24,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from common.config import EXPERIMENTS_DIR
+from common.logging_config import setup_logger
 from common.results_manager import ResultsManager
 from ui.shared.widgets import SectionHeader
+
+logger = setup_logger("ReceiverResultsView")
 
 
 class ReceiverResultsView(QWidget):
@@ -107,26 +110,39 @@ class ReceiverResultsView(QWidget):
 
         layout.addWidget(filter_frame)
 
-        # Results table
+        # Results table (Interactive mode with pre-configured column widths for 60 FPS performance)
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+        col_widths = [220, 140, 70, 95, 90, 110, 85, 75, 75, 85, 80]
+        for col_idx, width in enumerate(col_widths):
+            self.table.setColumnWidth(col_idx, width)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self.table, stretch=1)
 
-        self.refresh_btn.clicked.connect(self.load_records)
+        self._is_dirty = True
+        self.refresh_btn.clicked.connect(lambda: self.load_records(force=True))
         self.export_btn.clicked.connect(self._export_csv)
         self.export_summary_btn.clicked.connect(self._export_summary)
-        self.load_records()
+        self.load_records(force=True)
 
-    def load_records(self, *args, **kwargs):
-        """Loads records from database and applies active filters."""
-        self._all_records = self.results_manager.fetch_all()
+    def mark_dirty(self):
+        """Flags records as modified so the table refreshes smoothly when viewed."""
+        self._is_dirty = True
+
+    def load_records(self, force: bool = False, *args, **kwargs):
+        """Loads records from database with smart caching to eliminate UI freezes."""
+        if force or self._is_dirty or not self._all_records:
+            try:
+                self._all_records = self.results_manager.fetch_all()
+                self._is_dirty = False
+            except Exception as e:
+                logger.error(f"Error fetching records: {e}")
         self._apply_filters()
 
     def _apply_filters(self):
-        """Filters in-memory records and populates table cells."""
+        """Filters in-memory records and populates table cells without triggering redraw stalls."""
         search_txt = self.search_input.text().strip().lower()
         q_sel = self.quality_combo.currentText()
         m_sel = self.mode_combo.currentText()
@@ -157,93 +173,101 @@ class ReceiverResultsView(QWidget):
             filtered.append(r)
 
         self.records_count_lbl.setText(f"Total Records: {len(self._all_records)} (Showing: {len(filtered)})")
-        self.table.setRowCount(len(filtered))
 
-        for row_idx, r in enumerate(filtered):
-            # 0: Experiment ID
-            item_exp = QTableWidgetItem(str(r.get("experiment_id") or ""))
-            item_exp.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row_idx, 0, item_exp)
+        # Freeze table updates during bulk insertion to prevent thousands of layout recalculations
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(filtered))
 
-            # 1: Image ID
-            item_img = QTableWidgetItem(str(r.get("image_id") or ""))
-            self.table.setItem(row_idx, 1, item_img)
+            for row_idx, r in enumerate(filtered):
+                # 0: Experiment ID
+                item_exp = QTableWidgetItem(str(r.get("experiment_id") or ""))
+                item_exp.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 0, item_exp)
 
-            # 2: Quality
-            q_val = r.get("compression_quality")
-            q_str = f"Q{q_val}" if q_val is not None else "-"
-            item_q = QTableWidgetItem(q_str)
-            item_q.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row_idx, 2, item_q)
+                # 1: Image ID
+                item_img = QTableWidgetItem(str(r.get("image_id") or ""))
+                self.table.setItem(row_idx, 1, item_img)
 
-            # 3: Comp Size
-            comp_sz = r.get("compressed_file_size")
-            comp_sz_str = f"{comp_sz:,} B" if comp_sz is not None else "-"
-            item_sz = QTableWidgetItem(comp_sz_str)
-            item_sz.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 3, item_sz)
+                # 2: Quality
+                q_val = r.get("compression_quality")
+                q_str = f"Q{q_val}" if q_val is not None else "-"
+                item_q = QTableWidgetItem(q_str)
+                item_q.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 2, item_q)
 
-            # 4: Tx Time (s)
-            tx_time = r.get("transmission_time_sec")
-            tx_str = f"{tx_time:.4f}" if tx_time is not None else "-"
-            item_tx = QTableWidgetItem(tx_str)
-            item_tx.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 4, item_tx)
+                # 3: Comp Size
+                comp_sz = r.get("compressed_file_size")
+                comp_sz_str = f"{comp_sz:,} B" if comp_sz is not None else "-"
+                item_sz = QTableWidgetItem(comp_sz_str)
+                item_sz.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 3, item_sz)
 
-            # 5: Throughput (Kbps)
-            thru = r.get("measured_throughput_kbps")
-            thru_str = f"{thru:,.2f}" if thru is not None else "-"
-            item_thru = QTableWidgetItem(thru_str)
-            item_thru.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 5, item_thru)
+                # 4: Tx Time (s)
+                tx_time = r.get("transmission_time_sec")
+                tx_str = f"{tx_time:.4f}" if tx_time is not None else "-"
+                item_tx = QTableWidgetItem(tx_str)
+                item_tx.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 4, item_tx)
 
-            # 6: Checksum
-            chk = r.get("checksum_verified")
-            chk_str = "Verified" if chk else "Failed"
-            item_chk = QTableWidgetItem(chk_str)
-            item_chk.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if chk:
-                item_chk.setForeground(QColor("#10b981"))
-            else:
-                item_chk.setForeground(QColor("#ef4444"))
-            self.table.setItem(row_idx, 6, item_chk)
+                # 5: Throughput (Kbps)
+                thru = r.get("measured_throughput_kbps")
+                thru_str = f"{thru:,.2f}" if thru is not None else "-"
+                item_thru = QTableWidgetItem(thru_str)
+                item_thru.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 5, item_thru)
 
-            # 7: Dice
-            dice = r.get("dice_coefficient")
-            dice_str = f"{dice:.4f}" if dice is not None else "-"
-            item_dice = QTableWidgetItem(dice_str)
-            item_dice.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if dice is not None:
-                if dice >= 0.70:
-                    item_dice.setForeground(QColor("#10b981"))
-                elif dice >= 0.50:
-                    item_dice.setForeground(QColor("#38bdf8"))
+                # 6: Checksum
+                chk = r.get("checksum_verified")
+                chk_str = "Verified" if chk else "Failed"
+                item_chk = QTableWidgetItem(chk_str)
+                item_chk.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if chk:
+                    item_chk.setForeground(QColor("#10b981"))
                 else:
-                    item_dice.setForeground(QColor("#f59e0b"))
-            self.table.setItem(row_idx, 7, item_dice)
+                    item_chk.setForeground(QColor("#ef4444"))
+                self.table.setItem(row_idx, 6, item_chk)
 
-            # 8: IoU
-            iou = r.get("iou")
-            iou_str = f"{iou:.4f}" if iou is not None else "-"
-            item_iou = QTableWidgetItem(iou_str)
-            item_iou.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if iou is not None and iou >= 0.50:
-                item_iou.setForeground(QColor("#38bdf8"))
-            self.table.setItem(row_idx, 8, item_iou)
+                # 7: Dice
+                dice = r.get("dice_coefficient")
+                dice_str = f"{dice:.4f}" if dice is not None else "-"
+                item_dice = QTableWidgetItem(dice_str)
+                item_dice.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if dice is not None:
+                    if dice >= 0.70:
+                        item_dice.setForeground(QColor("#10b981"))
+                    elif dice >= 0.50:
+                        item_dice.setForeground(QColor("#38bdf8"))
+                    else:
+                        item_dice.setForeground(QColor("#f59e0b"))
+                self.table.setItem(row_idx, 7, item_dice)
 
-            # 9: PSNR
-            psnr = r.get("psnr")
-            psnr_str = f"{psnr:.2f} dB" if psnr is not None else "-"
-            item_psnr = QTableWidgetItem(psnr_str)
-            item_psnr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 9, item_psnr)
+                # 8: IoU
+                iou = r.get("iou")
+                iou_str = f"{iou:.4f}" if iou is not None else "-"
+                item_iou = QTableWidgetItem(iou_str)
+                item_iou.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if iou is not None and iou >= 0.50:
+                    item_iou.setForeground(QColor("#38bdf8"))
+                self.table.setItem(row_idx, 8, item_iou)
 
-            # 10: SSIM
-            ssim = r.get("ssim")
-            ssim_str = f"{ssim:.4f}" if ssim is not None else "-"
-            item_ssim = QTableWidgetItem(ssim_str)
-            item_ssim.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 10, item_ssim)
+                # 9: PSNR
+                psnr = r.get("psnr")
+                psnr_str = f"{psnr:.2f} dB" if psnr is not None else "-"
+                item_psnr = QTableWidgetItem(psnr_str)
+                item_psnr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 9, item_psnr)
+
+                # 10: SSIM
+                ssim = r.get("ssim")
+                ssim_str = f"{ssim:.4f}" if ssim is not None else "-"
+                item_ssim = QTableWidgetItem(ssim_str)
+                item_ssim.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 10, item_ssim)
+        finally:
+            self.table.setUpdatesEnabled(True)
+            self.table.blockSignals(False)
 
     def _export_csv(self):
         """Exports the raw records to a user-selected CSV file path."""

@@ -102,12 +102,12 @@ class AutomatedExperimentWorker(QThread):
 
 
 class TestImageSelectionDialog(QDialog):
-    """Modal dialog allowing the user to select exactly 10 images from the held-out test split."""
+    """Modal dialog allowing the user to select any desired number of images from the held-out test split."""
 
     def __init__(self, current_selection: List[DatasetItem], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Select 10 Held-Out Test Images")
-        self.resize(720, 520)
+        self.setWindowTitle("Select Held-Out Test Images")
+        self.resize(750, 540)
         self.selected_items: List[DatasetItem] = list(current_selection)
         self.all_test_items: List[DatasetItem] = []
         self._load_available_test_items()
@@ -115,7 +115,7 @@ class TestImageSelectionDialog(QDialog):
 
     def _load_available_test_items(self):
         try:
-            # Load all test split images from splits.json (up to 117)
+            # Load all available test split images from splits.json (up to 150)
             self.all_test_items = load_test_dataset_items(count=150)
         except Exception as e:
             logger.error(f"Error loading test split items: {e}")
@@ -125,28 +125,34 @@ class TestImageSelectionDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        header_lbl = QLabel("<b>Select exactly 10 images from the held-out test split:</b>")
+        header_lbl = QLabel("<b>Select desired images from the held-out test split (or use presets below):</b>")
         header_lbl.setStyleSheet("color: #f8fafc; font-size: 13px;")
         layout.addWidget(header_lbl)
 
         # Filter and helper buttons row
         btn_bar = QHBoxLayout()
-        self.counter_lbl = QLabel(f"Selected: {len(self.selected_items)} / 10 images")
+        self.counter_lbl = QLabel(f"Selected: {len(self.selected_items)} image(s)")
         self.counter_lbl.setStyleSheet(
             "background: #0f172a; color: #38bdf8; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
         )
         btn_bar.addWidget(self.counter_lbl)
         btn_bar.addStretch()
 
-        self.btn_default_10 = QPushButton("Use First 10 Images")
+        self.btn_default_10 = QPushButton("Use First 10")
         self.btn_default_10.setObjectName("SecondaryBtn")
-        self.btn_stratified_10 = QPushButton("Select 10 Stratified (5 Benign, 3 Malignant, 2 Normal)")
-        self.btn_stratified_10.setObjectName("SecondaryBtn")
-        self.btn_clear_all = QPushButton("Clear Selection")
+        self.btn_first_25 = QPushButton("Use First 25")
+        self.btn_first_25.setObjectName("SecondaryBtn")
+        self.btn_first_50 = QPushButton("Use First 50")
+        self.btn_first_50.setObjectName("SecondaryBtn")
+        self.btn_select_all = QPushButton(f"Select All ({len(self.all_test_items)})")
+        self.btn_select_all.setObjectName("SecondaryBtn")
+        self.btn_clear_all = QPushButton("Clear All")
         self.btn_clear_all.setObjectName("SecondaryBtn")
 
         btn_bar.addWidget(self.btn_default_10)
-        btn_bar.addWidget(self.btn_stratified_10)
+        btn_bar.addWidget(self.btn_first_25)
+        btn_bar.addWidget(self.btn_first_50)
+        btn_bar.addWidget(self.btn_select_all)
         btn_bar.addWidget(self.btn_clear_all)
         layout.addLayout(btn_bar)
 
@@ -180,18 +186,20 @@ class TestImageSelectionDialog(QDialog):
 
         layout.addWidget(self.table)
 
-        # Dialog Buttons (OK enabled only when count == 10)
+        # Dialog Buttons (OK enabled when count >= 1)
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self.ok_btn.setText("Confirm 10 Images")
+        self.ok_btn.setText(f"Confirm {len(self.selected_items)} Images")
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
 
         self._update_counter_state()
 
-        self.btn_default_10.clicked.connect(self._select_first_10)
-        self.btn_stratified_10.clicked.connect(self._select_stratified_10)
+        self.btn_default_10.clicked.connect(lambda: self._select_n(10))
+        self.btn_first_25.clicked.connect(lambda: self._select_n(25))
+        self.btn_first_50.clicked.connect(lambda: self._select_n(50))
+        self.btn_select_all.clicked.connect(lambda: self._select_n(len(self.all_test_items)))
         self.btn_clear_all.clicked.connect(self._clear_all)
 
     def _on_checkbox_toggled(self):
@@ -204,49 +212,27 @@ class TestImageSelectionDialog(QDialog):
 
     def _update_counter_state(self):
         count = len(self.selected_items)
-        if count == 10:
-            self.counter_lbl.setText("Selected: Exactly 10 / 10 images (Ready)")
+        if count >= 1:
+            self.counter_lbl.setText(f"Selected: {count} image(s) (Ready)")
             self.counter_lbl.setStyleSheet(
                 "background: #064e3b; color: #34d399; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
             )
             self.ok_btn.setEnabled(True)
+            self.ok_btn.setText(f"Confirm {count} Images")
         else:
-            self.counter_lbl.setText(f"Selected: {count} / 10 images (Must be exactly 10)")
+            self.counter_lbl.setText("Selected: 0 images (Please select at least 1 image)")
             self.counter_lbl.setStyleSheet(
                 "background: #450a0a; color: #f87171; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
             )
             self.ok_btn.setEnabled(False)
+            self.ok_btn.setText("Confirm Selection")
 
-    def _select_first_10(self):
+    def _select_n(self, n: int):
         for i, (chk, _) in enumerate(self.checkboxes):
             chk.blockSignals(True)
-            chk.setChecked(i < 10)
+            chk.setChecked(i < n)
             chk.blockSignals(False)
-        self.selected_items = [item for _, item in self.checkboxes[:10]]
-        self._update_counter_state()
-
-    def _select_stratified_10(self):
-        b_count, m_count, n_count = 0, 0, 0
-        new_sel = []
-        for chk, item in self.checkboxes:
-            chk.blockSignals(True)
-            cat = item.category.lower()
-            if cat == "benign" and b_count < 5:
-                chk.setChecked(True)
-                new_sel.append(item)
-                b_count += 1
-            elif cat == "malignant" and m_count < 3:
-                chk.setChecked(True)
-                new_sel.append(item)
-                m_count += 1
-            elif cat == "normal" and n_count < 2:
-                chk.setChecked(True)
-                new_sel.append(item)
-                n_count += 1
-            else:
-                chk.setChecked(False)
-            chk.blockSignals(False)
-        self.selected_items = new_sel
+        self.selected_items = [item for _, item in self.checkboxes[:n]]
         self._update_counter_state()
 
     def _clear_all(self):
@@ -256,6 +242,9 @@ class TestImageSelectionDialog(QDialog):
             chk.blockSignals(False)
         self.selected_items = []
         self._update_counter_state()
+
+    def get_selected_items(self) -> List[DatasetItem]:
+        return list(self.selected_items)
 
     def get_selected_items(self) -> List[DatasetItem]:
         return list(self.selected_items)
@@ -618,9 +607,9 @@ class SenderTransmissionView(QWidget):
         auto_layout.addLayout(auto_header_row)
 
         auto_desc = QLabel(
-            "Automated Transmission: Runs the complete cross-product matrix across 10 held-out test images × "
+            "Automated Transmission: Runs the complete cross-product matrix across selected test images × "
             "8 compression configurations (4 Uniform JPEG + 4 Region-Adaptive ROI combinations) × "
-            "6 network emulation profiles = 480 total transmissions over TCP with end-to-end receiver ACK verification."
+            "6 network emulation profiles over TCP with end-to-end receiver ACK verification."
         )
         auto_desc.setStyleSheet("color: #94a3b8; font-size: 11px;")
         auto_desc.setWordWrap(True)
@@ -632,7 +621,7 @@ class SenderTransmissionView(QWidget):
         self.run_all_experiments_btn.setStyleSheet(
             "background: #059669; color: white; font-weight: 800; font-size: 12px; padding: 10px 18px; border-radius: 6px;"
         )
-        self.select_test_images_btn = QPushButton("Select 10 Test Images...")
+        self.select_test_images_btn = QPushButton("Select Test Images...")
         self.select_test_images_btn.setObjectName("SecondaryBtn")
 
         self.stop_auto_btn = QPushButton("Stop Experiments")
@@ -1310,7 +1299,7 @@ class SenderTransmissionView(QWidget):
     # One-Click Automated Experiment Handlers
     # -------------------------------------------------------------
     def _handle_select_test_images(self):
-        """Opens modal dialog allowing user to choose exactly 10 images from the held-out test split."""
+        """Opens modal dialog allowing user to choose any desired number of images from the held-out test split."""
         dlg = TestImageSelectionDialog(self.selected_test_items, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.selected_test_items = dlg.get_selected_items()
@@ -1318,8 +1307,8 @@ class SenderTransmissionView(QWidget):
 
     def _update_selected_images_display(self):
         count = len(self.selected_test_items)
-        self.lbl_selected_img_count.setText(f"Selected Images: {count} / 10 from held-out test split")
-        if count == 10:
+        self.lbl_selected_img_count.setText(f"Selected Images: {count} from held-out test split")
+        if count >= 1:
             self.lbl_selected_img_count.setStyleSheet(
                 "background: #064e3b; color: #34d399; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
             )
@@ -1330,12 +1319,12 @@ class SenderTransmissionView(QWidget):
 
     def _handle_run_all_experiments(self):
         """Validates prerequisites and executes the full automated experiment matrix."""
-        if len(self.selected_test_items) != 10:
+        if not self.selected_test_items:
             QMessageBox.warning(
                 self,
                 "Selection Incomplete",
-                f"Exactly 10 test images are required before execution.\nCurrently selected: {len(self.selected_test_items)}.\n\n"
-                "Please click 'Select 10 Test Images...' to choose 10 images.",
+                "Please select at least 1 image before execution.\n\n"
+                "Click 'Select Test Images...' to choose images from the test split.",
             )
             return
 

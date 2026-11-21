@@ -218,7 +218,7 @@ class TestTransmissionViewUI(unittest.TestCase):
         self.assertTrue(view.run_all_experiments_btn.isEnabled())
 
         self.assertIsNotNone(view.select_test_images_btn)
-        self.assertEqual(view.select_test_images_btn.text(), "Select 10 Test Images...")
+        self.assertEqual(view.select_test_images_btn.text(), "Select Test Images...")
 
         self.assertIsNotNone(view.stop_auto_btn)
         self.assertEqual(view.stop_auto_btn.text(), "Stop Experiments")
@@ -230,9 +230,9 @@ class TestTransmissionViewUI(unittest.TestCase):
         self.assertIsNotNone(view.auto_lbl_current_net)
         self.assertIsNotNone(view.auto_lbl_counts)
 
-        # Verify initial 10 items loaded
-        self.assertEqual(len(view.selected_test_items), 10)
-        self.assertIn("10 / 10", view.lbl_selected_img_count.text())
+        # Verify initial items loaded and badge text
+        self.assertGreaterEqual(len(view.selected_test_items), 1)
+        self.assertIn("Selected Images:", view.lbl_selected_img_count.text())
 
     def test_image_selection_dialog(self):
         from ui.sender.transmission_view import TestImageSelectionDialog
@@ -248,8 +248,18 @@ class TestTransmissionViewUI(unittest.TestCase):
         self.assertFalse(dlg.ok_btn.isEnabled())
 
         # Test selecting first 10 re-enables OK button
-        dlg._select_first_10()
+        dlg._select_n(10)
         self.assertEqual(len(dlg.selected_items), 10)
+        self.assertTrue(dlg.ok_btn.isEnabled())
+
+        # Test arbitrary selection (e.g. first 25 preset if >= 25 items exist, or all)
+        dlg._select_n(25)
+        self.assertTrue(len(dlg.selected_items) >= 1)
+        self.assertTrue(dlg.ok_btn.isEnabled())
+
+        # Test select all
+        dlg._select_n(len(dlg.all_test_items))
+        self.assertEqual(len(dlg.selected_items), len(dlg.all_test_items))
         self.assertTrue(dlg.ok_btn.isEnabled())
 
 
