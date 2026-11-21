@@ -90,7 +90,7 @@ class SenderMainWindow(QMainWindow):
         self.dataset_view = SenderDatasetView()
         self.compression_view = SenderCompressionView()
         self.network_view = SenderNetworkView()
-        self.transmission_view = SenderTransmissionView()
+        self.transmission_view = SenderTransmissionView(network_controller=self.network_view.controller)
         self.adaptive_view = SenderAdaptiveView(
             tcp_client=self.transmission_view.client,
             network_controller=self.network_view.controller,

@@ -34,9 +34,11 @@ class ExperimentRecord:
     compression_ratio: float
     psnr: Optional[float] = None  # dB or None if uncalculated
     ssim: Optional[float] = None  # 0..1 or None if uncalculated
-    bandwidth_limit: Optional[str] = None  # e.g., "10mbit" or "unshaped"
+    bandwidth_limit: Optional[str] = None  # e.g., "100mbit" or "unshaped"
     packet_loss_rate: Optional[float] = None  # %
     network_delay_ms: Optional[float] = None  # ms
+    network_jitter_ms: Optional[float] = None  # ms
+    network_profile: Optional[str] = None  # e.g., "Hospital LAN", "4G LTE"
     theoretical_transmission_time_sec: Optional[float] = None  # theoretical wire delay (s)
     transmission_time_sec: Optional[float] = None  # measured wire seconds
     measured_throughput_kbps: Optional[float] = None  # measured kbps
@@ -111,6 +113,8 @@ INSERT_COLUMNS = [
     "bandwidth_limit",
     "packet_loss_rate",
     "network_delay_ms",
+    "network_jitter_ms",
+    "network_profile",
     "theoretical_transmission_time_sec",
     "transmission_time_sec",
     "measured_throughput_kbps",
@@ -155,6 +159,8 @@ SCHEMA_DEFINITIONS = [
     ("bandwidth_limit", "TEXT"),
     ("packet_loss_rate", "REAL"),
     ("network_delay_ms", "REAL"),
+    ("network_jitter_ms", "REAL"),
+    ("network_profile", "TEXT"),
     ("theoretical_transmission_time_sec", "REAL"),
     ("transmission_time_sec", "REAL"),
     ("measured_throughput_kbps", "REAL"),

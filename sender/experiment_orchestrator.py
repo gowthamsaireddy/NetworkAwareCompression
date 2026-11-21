@@ -193,8 +193,10 @@ class ExperimentOrchestrator:
 
         # 5. Step 5: Calculate theoretical wire time
         bw_str = profile.bandwidth if profile else "unshaped"
-        loss_pct = profile.loss_percent if profile else 0.0
+        loss_pct = float(profile.loss_percent) if profile else 0.0
         delay_ms = float(profile.delay_ms) if profile else 0.0
+        jitter_ms = float(profile.jitter_ms) if profile else 0.0
+        profile_name = profile.name if profile else "Unshaped Baseline"
         bw_bps = profile.bandwidth_bps if profile else 0.0
         theo_time = compute_theoretical_transmission_time(comp_size, bw_bps)
 
@@ -223,6 +225,8 @@ class ExperimentOrchestrator:
             bandwidth_limit=bw_str,
             packet_loss_rate=loss_pct,
             network_delay_ms=delay_ms,
+            network_jitter_ms=jitter_ms,
+            network_profile=profile_name,
             theoretical_transmission_time_sec=theo_time,
             transmission_time_sec=report.wire_time_sec,
             measured_throughput_kbps=report.throughput_kbps,

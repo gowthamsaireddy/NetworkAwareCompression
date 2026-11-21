@@ -34,6 +34,12 @@ from common.config import get_sender_config
 from common.logging_config import setup_logger
 from common.results_manager import ExperimentRecord, ResultsManager
 from sender.adaptive_controller import AdaptiveController
+from sender.automated_experiment_runner import (
+    AutomatedExperimentRunner,
+    CompressionConfig,
+    get_supported_compression_configs,
+    load_test_dataset_items,
+)
 from sender.dataset_manager import DatasetItem
 from sender.experiment_orchestrator import ExperimentOrchestrator
 from sender.network_control import (
@@ -53,6 +59,206 @@ from shared.metadata import TransmissionMetadata
 from ui.shared.widgets import MetricBox, SectionHeader
 
 logger = setup_logger("TransmissionView")
+
+
+class AutomatedExperimentWorker(QThread):
+    """Background worker executing the complete automated compression x network experiment matrix."""
+
+    progress_updated = pyqtSignal(int, int, str, str, str, int, int, object)  # curr, total, img_id, cfg_name, prof_name, succ, fail, rec
+    finished = pyqtSignal(bool, str, dict)  # is_completed, summary_msg, manifest
+
+    def __init__(
+        self,
+        runner: AutomatedExperimentRunner,
+        items: List[DatasetItem],
+        configs: Optional[List[CompressionConfig]] = None,
+        profiles: Optional[List[NetworkProfile]] = None,
+    ):
+        super().__init__()
+        self.runner = runner
+        self.items = items
+        self.configs = configs
+        self.profiles = profiles
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        def _cb(curr, total, img_id, cfg_name, prof_name, succ, fail, rec):
+            self.progress_updated.emit(curr, total, img_id, cfg_name, prof_name, succ, fail, rec)
+
+        def _is_stopped():
+            return self._stop_requested
+
+        completed, msg, manifest = self.runner.run_all_experiments(
+            items=self.items,
+            compression_configs=self.configs,
+            network_profiles=self.profiles,
+            progress_callback=_cb,
+            stop_requested=_is_stopped,
+        )
+        self.finished.emit(completed, msg, manifest)
+
+
+class TestImageSelectionDialog(QDialog):
+    """Modal dialog allowing the user to select exactly 10 images from the held-out test split."""
+
+    def __init__(self, current_selection: List[DatasetItem], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select 10 Held-Out Test Images")
+        self.resize(720, 520)
+        self.selected_items: List[DatasetItem] = list(current_selection)
+        self.all_test_items: List[DatasetItem] = []
+        self._load_available_test_items()
+        self.init_ui()
+
+    def _load_available_test_items(self):
+        try:
+            # Load all test split images from splits.json (up to 117)
+            self.all_test_items = load_test_dataset_items(count=150)
+        except Exception as e:
+            logger.error(f"Error loading test split items: {e}")
+            self.all_test_items = []
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        header_lbl = QLabel("<b>Select exactly 10 images from the held-out test split:</b>")
+        header_lbl.setStyleSheet("color: #f8fafc; font-size: 13px;")
+        layout.addWidget(header_lbl)
+
+        # Filter and helper buttons row
+        btn_bar = QHBoxLayout()
+        self.counter_lbl = QLabel(f"Selected: {len(self.selected_items)} / 10 images")
+        self.counter_lbl.setStyleSheet(
+            "background: #0f172a; color: #38bdf8; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
+        )
+        btn_bar.addWidget(self.counter_lbl)
+        btn_bar.addStretch()
+
+        self.btn_default_10 = QPushButton("Use First 10 Images")
+        self.btn_default_10.setObjectName("SecondaryBtn")
+        self.btn_stratified_10 = QPushButton("Select 10 Stratified (5 Benign, 3 Malignant, 2 Normal)")
+        self.btn_stratified_10.setObjectName("SecondaryBtn")
+        self.btn_clear_all = QPushButton("Clear Selection")
+        self.btn_clear_all.setObjectName("SecondaryBtn")
+
+        btn_bar.addWidget(self.btn_default_10)
+        btn_bar.addWidget(self.btn_stratified_10)
+        btn_bar.addWidget(self.btn_clear_all)
+        layout.addLayout(btn_bar)
+
+        # Table of test items
+        self.table = QTableWidget(len(self.all_test_items), 5)
+        self.table.setHorizontalHeaderLabels(["Select", "Image Identifier", "Category", "Dimensions", "Size (Bytes)"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        sel_ids = {it.image_id for it in self.selected_items}
+
+        self.checkboxes: List[Tuple[QCheckBox, DatasetItem]] = []
+        for row, item in enumerate(self.all_test_items):
+            chk = QCheckBox()
+            if item.image_id in sel_ids:
+                chk.setChecked(True)
+            chk.toggled.connect(self._on_checkbox_toggled)
+
+            chk_cell = QWidget()
+            chk_lay = QHBoxLayout(chk_cell)
+            chk_lay.addWidget(chk)
+            chk_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chk_lay.setContentsMargins(0, 0, 0, 0)
+
+            self.table.setCellWidget(row, 0, chk_cell)
+            self.table.setItem(row, 1, QTableWidgetItem(item.image_id))
+            self.table.setItem(row, 2, QTableWidgetItem(item.category.capitalize()))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{item.width} × {item.height}"))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{item.file_size_bytes:,}"))
+            self.checkboxes.append((chk, item))
+
+        layout.addWidget(self.table)
+
+        # Dialog Buttons (OK enabled only when count == 10)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok_btn.setText("Confirm 10 Images")
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        self._update_counter_state()
+
+        self.btn_default_10.clicked.connect(self._select_first_10)
+        self.btn_stratified_10.clicked.connect(self._select_stratified_10)
+        self.btn_clear_all.clicked.connect(self._clear_all)
+
+    def _on_checkbox_toggled(self):
+        curr_selected = []
+        for chk, item in self.checkboxes:
+            if chk.isChecked():
+                curr_selected.append(item)
+        self.selected_items = curr_selected
+        self._update_counter_state()
+
+    def _update_counter_state(self):
+        count = len(self.selected_items)
+        if count == 10:
+            self.counter_lbl.setText("Selected: Exactly 10 / 10 images (Ready)")
+            self.counter_lbl.setStyleSheet(
+                "background: #064e3b; color: #34d399; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
+            )
+            self.ok_btn.setEnabled(True)
+        else:
+            self.counter_lbl.setText(f"Selected: {count} / 10 images (Must be exactly 10)")
+            self.counter_lbl.setStyleSheet(
+                "background: #450a0a; color: #f87171; font-weight: 700; padding: 6px 12px; border-radius: 4px;"
+            )
+            self.ok_btn.setEnabled(False)
+
+    def _select_first_10(self):
+        for i, (chk, _) in enumerate(self.checkboxes):
+            chk.blockSignals(True)
+            chk.setChecked(i < 10)
+            chk.blockSignals(False)
+        self.selected_items = [item for _, item in self.checkboxes[:10]]
+        self._update_counter_state()
+
+    def _select_stratified_10(self):
+        b_count, m_count, n_count = 0, 0, 0
+        new_sel = []
+        for chk, item in self.checkboxes:
+            chk.blockSignals(True)
+            cat = item.category.lower()
+            if cat == "benign" and b_count < 5:
+                chk.setChecked(True)
+                new_sel.append(item)
+                b_count += 1
+            elif cat == "malignant" and m_count < 3:
+                chk.setChecked(True)
+                new_sel.append(item)
+                m_count += 1
+            elif cat == "normal" and n_count < 2:
+                chk.setChecked(True)
+                new_sel.append(item)
+                n_count += 1
+            else:
+                chk.setChecked(False)
+            chk.blockSignals(False)
+        self.selected_items = new_sel
+        self._update_counter_state()
+
+    def _clear_all(self):
+        for chk, _ in self.checkboxes:
+            chk.blockSignals(True)
+            chk.setChecked(False)
+            chk.blockSignals(False)
+        self.selected_items = []
+        self._update_counter_state()
+
+    def get_selected_items(self) -> List[DatasetItem]:
+        return list(self.selected_items)
 
 
 class SingleTransmissionWorker(QThread):
@@ -164,7 +370,7 @@ class SenderTransmissionView(QWidget):
     trial_recorded = pyqtSignal(object)  # Emits ExperimentRecord
     connection_changed = pyqtSignal(bool, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, network_controller: Optional[NetworkController] = None):
         super().__init__(parent)
         self.config = get_sender_config()
         self.client = TCPTransmissionClient(
@@ -173,7 +379,7 @@ class SenderTransmissionView(QWidget):
             timeout=self.config.socket_timeout,
         )
         self.results_manager = ResultsManager()
-        self.network_controller = NetworkController()
+        self.network_controller = network_controller or NetworkController()
         self.adaptive_controller = AdaptiveController()
         self.orchestrator = ExperimentOrchestrator(
             tcp_client=self.client,
@@ -191,6 +397,19 @@ class SenderTransmissionView(QWidget):
 
         self._worker: Optional[SingleTransmissionWorker] = None
         self._batch_worker: Optional[BatchExperimentWorker] = None
+        self._auto_worker: Optional[AutomatedExperimentWorker] = None
+
+        # Automated Full-Matrix Experiment Runner and initial 10 test items
+        self.auto_runner = AutomatedExperimentRunner(
+            tcp_client=self.client,
+            network_controller=self.network_controller,
+            results_manager=self.results_manager,
+        )
+        self.selected_test_items: List[DatasetItem] = []
+        try:
+            self.selected_test_items = load_test_dataset_items(count=10)
+        except Exception as e:
+            logger.warning(f"Could not load initial 10 test items: {e}")
 
         self.init_ui()
 
@@ -255,6 +474,86 @@ class SenderTransmissionView(QWidget):
         layout.addWidget(self.active_payload_banner)
 
         # -------------------------------------------------------------
+        # Network Conditions Frame
+        # -------------------------------------------------------------
+        net_cond_frame = QFrame()
+        net_cond_frame.setObjectName("CardFrame")
+        net_cond_layout = QVBoxLayout(net_cond_frame)
+        net_cond_layout.setSpacing(10)
+
+        net_header_row = QHBoxLayout()
+        net_sec_title = QLabel("Network Conditions")
+        net_sec_title.setObjectName("CardTitle")
+        self.active_net_status_badge = QLabel("Active Profile: None (Unshaped Baseline)")
+        self.active_net_status_badge.setStyleSheet(
+            "background: #0f172a; color: #38bdf8; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+        )
+        net_header_row.addWidget(net_sec_title)
+        net_header_row.addStretch()
+        net_header_row.addWidget(self.active_net_status_badge)
+        net_cond_layout.addLayout(net_header_row)
+
+        # Dropdown row
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("<b>Network Profile:</b>"))
+        self.trans_profile_combo = QComboBox()
+        self.trans_profile_combo.addItem("Unshaped Baseline (Direct link, zero added delay/loss)", None)
+        for p in PRESET_PROFILES:
+            self.trans_profile_combo.addItem(f"{p.name} ({p.bandwidth_display}, {p.delay_ms}ms delay)", p)
+        self.trans_profile_combo.addItem("Custom Configuration (Manual)", None)
+        prof_row.addWidget(self.trans_profile_combo, stretch=1)
+        net_cond_layout.addLayout(prof_row)
+
+        # Description label
+        self.trans_profile_desc_lbl = QLabel(
+            "Direct unshaped local link without artificial bandwidth throttling, delay, or packet loss."
+        )
+        self.trans_profile_desc_lbl.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 11px;")
+        self.trans_profile_desc_lbl.setWordWrap(True)
+        net_cond_layout.addWidget(self.trans_profile_desc_lbl)
+
+        # Displays Grid
+        params_grid = QGridLayout()
+        params_grid.setSpacing(8)
+
+        params_grid.addWidget(QLabel("Bandwidth:"), 0, 0)
+        self.lbl_bw_val = QLabel("Unlimited (Unshaped)")
+        self.lbl_bw_val.setStyleSheet("font-weight: 700; color: #f8fafc;")
+        params_grid.addWidget(self.lbl_bw_val, 0, 1)
+
+        params_grid.addWidget(QLabel("One-way Delay:"), 0, 2)
+        self.lbl_delay_val = QLabel("0.0 ms")
+        self.lbl_delay_val.setStyleSheet("font-weight: 700; color: #f8fafc;")
+        params_grid.addWidget(self.lbl_delay_val, 0, 3)
+
+        params_grid.addWidget(QLabel("Jitter:"), 1, 0)
+        self.lbl_jitter_val = QLabel("±0.0 ms")
+        self.lbl_jitter_val.setStyleSheet("font-weight: 700; color: #f8fafc;")
+        params_grid.addWidget(self.lbl_jitter_val, 1, 1)
+
+        params_grid.addWidget(QLabel("Packet Loss:"), 1, 2)
+        self.lbl_loss_val = QLabel("0.00 %")
+        self.lbl_loss_val.setStyleSheet("font-weight: 700; color: #f8fafc;")
+        params_grid.addWidget(self.lbl_loss_val, 1, 3)
+
+        net_cond_layout.addLayout(params_grid)
+
+        # Buttons row
+        net_btn_row = QHBoxLayout()
+        self.trans_apply_profile_btn = QPushButton("Apply Network Profile")
+        self.trans_apply_profile_btn.setStyleSheet(
+            "background: #0284c7; color: white; font-weight: 700; padding: 6px 14px; border-radius: 5px;"
+        )
+        self.trans_reset_profile_btn = QPushButton("Reset Network")
+        self.trans_reset_profile_btn.setObjectName("SecondaryBtn")
+        net_btn_row.addWidget(self.trans_apply_profile_btn)
+        net_btn_row.addWidget(self.trans_reset_profile_btn)
+        net_btn_row.addStretch()
+
+        net_cond_layout.addLayout(net_btn_row)
+        layout.addWidget(net_cond_frame)
+
+        # -------------------------------------------------------------
         # Transfer & Batch Controls Frame
         # -------------------------------------------------------------
         trans_frame = QFrame()
@@ -297,6 +596,85 @@ class SenderTransmissionView(QWidget):
         trans_layout.addWidget(self.batch_status_lbl)
 
         layout.addWidget(trans_frame)
+
+        # -------------------------------------------------------------
+        # One-Click Automated Image Transmission Frame
+        # -------------------------------------------------------------
+        auto_frame = QFrame()
+        auto_frame.setObjectName("CardFrame")
+        auto_layout = QVBoxLayout(auto_frame)
+        auto_layout.setSpacing(10)
+
+        auto_header_row = QHBoxLayout()
+        auto_title = QLabel("One-Click Automated Image Transmission")
+        auto_title.setObjectName("CardTitle")
+        self.lbl_selected_img_count = QLabel(f"Selected Images: {len(self.selected_test_items)} / 10 from held-out test split")
+        self.lbl_selected_img_count.setStyleSheet(
+            "background: #0f172a; color: #10b981; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+        )
+        auto_header_row.addWidget(auto_title)
+        auto_header_row.addStretch()
+        auto_header_row.addWidget(self.lbl_selected_img_count)
+        auto_layout.addLayout(auto_header_row)
+
+        auto_desc = QLabel(
+            "Automated Transmission: Runs the complete cross-product matrix across 10 held-out test images × "
+            "8 compression configurations (4 Uniform JPEG + 4 Region-Adaptive ROI combinations) × "
+            "6 network emulation profiles = 480 total transmissions over TCP with end-to-end receiver ACK verification."
+        )
+        auto_desc.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        auto_desc.setWordWrap(True)
+        auto_layout.addWidget(auto_desc)
+
+        # Buttons row
+        auto_btn_row = QHBoxLayout()
+        self.run_all_experiments_btn = QPushButton("Run All Compression × Network Experiments")
+        self.run_all_experiments_btn.setStyleSheet(
+            "background: #059669; color: white; font-weight: 800; font-size: 12px; padding: 10px 18px; border-radius: 6px;"
+        )
+        self.select_test_images_btn = QPushButton("Select 10 Test Images...")
+        self.select_test_images_btn.setObjectName("SecondaryBtn")
+
+        self.stop_auto_btn = QPushButton("Stop Experiments")
+        self.stop_auto_btn.setObjectName("DangerBtn")
+        self.stop_auto_btn.setEnabled(False)
+
+        auto_btn_row.addWidget(self.run_all_experiments_btn)
+        auto_btn_row.addWidget(self.select_test_images_btn)
+        auto_btn_row.addWidget(self.stop_auto_btn)
+        auto_btn_row.addStretch()
+        auto_layout.addLayout(auto_btn_row)
+
+        # Real-time Telemetry Grid
+        telemetry_grid = QGridLayout()
+        telemetry_grid.setSpacing(6)
+
+        self.auto_lbl_current_img = QLabel("Current Image: Idle (Click button to begin)")
+        self.auto_lbl_current_img.setStyleSheet("font-weight: 600; color: #f8fafc; font-size: 11px;")
+
+        self.auto_lbl_current_comp = QLabel("Current Compression: Idle")
+        self.auto_lbl_current_comp.setStyleSheet("font-weight: 600; color: #38bdf8; font-size: 11px;")
+
+        self.auto_lbl_current_net = QLabel("Current Network Profile: Idle")
+        self.auto_lbl_current_net.setStyleSheet("font-weight: 600; color: #fbbf24; font-size: 11px;")
+
+        self.auto_lbl_counts = QLabel("Results: 0 Succeeded | 0 Failed")
+        self.auto_lbl_counts.setStyleSheet("font-weight: 700; color: #10b981; font-size: 11px;")
+
+        telemetry_grid.addWidget(self.auto_lbl_current_img, 0, 0)
+        telemetry_grid.addWidget(self.auto_lbl_current_comp, 0, 1)
+        telemetry_grid.addWidget(self.auto_lbl_current_net, 1, 0)
+        telemetry_grid.addWidget(self.auto_lbl_counts, 1, 1)
+        auto_layout.addLayout(telemetry_grid)
+
+        # Progress bar
+        self.auto_progress_bar = QProgressBar()
+        self.auto_progress_bar.setValue(0)
+        self.auto_progress_bar.setTextVisible(True)
+        self.auto_progress_bar.setFormat("Idle (0 / 480 transmissions)")
+        auto_layout.addWidget(self.auto_progress_bar)
+
+        layout.addWidget(auto_frame)
 
         # -------------------------------------------------------------
         # Measured Transmission Telemetry Grid
@@ -345,6 +723,12 @@ class SenderTransmissionView(QWidget):
         self.start_batch_btn.clicked.connect(self._handle_start_batch)
         self.pause_batch_btn.clicked.connect(self._handle_toggle_pause)
         self.abort_batch_btn.clicked.connect(self._handle_abort_batch)
+        self.trans_profile_combo.currentIndexChanged.connect(self._on_trans_profile_changed)
+        self.trans_apply_profile_btn.clicked.connect(self._handle_apply_trans_profile)
+        self.trans_reset_profile_btn.clicked.connect(self._handle_reset_trans_network)
+        self.run_all_experiments_btn.clicked.connect(self._handle_run_all_experiments)
+        self.select_test_images_btn.clicked.connect(self._handle_select_test_images)
+        self.stop_auto_btn.clicked.connect(self._handle_stop_auto_experiments)
 
     def _sync_endpoint_from_inputs(self):
         host = self.ip_input.text().strip()
@@ -408,9 +792,95 @@ class SenderTransmissionView(QWidget):
             )
         self.active_payload_banner.setText(desc)
 
+    def _on_trans_profile_changed(self, index: int):
+        profile: NetworkProfile | None = self.trans_profile_combo.currentData()
+        if profile is not None:
+            self.trans_profile_desc_lbl.setText(profile.description)
+            self.lbl_bw_val.setText(profile.bandwidth_display)
+            self.lbl_delay_val.setText(f"{profile.delay_ms} ms")
+            self.lbl_jitter_val.setText(f"±{profile.jitter_ms} ms")
+            self.lbl_loss_val.setText(f"{profile.loss_percent:.2f} %")
+        elif index == 0:
+            self.trans_profile_desc_lbl.setText(
+                "Direct unshaped local link without artificial bandwidth throttling, delay, or packet loss."
+            )
+            self.lbl_bw_val.setText("Unlimited (Unshaped)")
+            self.lbl_delay_val.setText("0.0 ms")
+            self.lbl_jitter_val.setText("±0.0 ms")
+            self.lbl_loss_val.setText("0.00 %")
+        else:
+            self.trans_profile_desc_lbl.setText("Custom user-specified network conditions.")
+
+    def _handle_apply_trans_profile(self):
+        profile: NetworkProfile | None = self.trans_profile_combo.currentData()
+        if profile is None:
+            self._handle_reset_trans_network()
+            return
+
+        success, msg = self.network_controller.apply_profile(profile)
+        self._active_profile = profile
+        if success:
+            self.active_net_status_badge.setText(f"Active Profile: {profile.name} (Applied)")
+            self.active_net_status_badge.setStyleSheet(
+                "background: #064e3b; color: #6ee7b7; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
+            QMessageBox.information(self, "Network Profile Applied", msg)
+        else:
+            self.active_net_status_badge.setText(f"Selected Profile: {profile.name} (Emulation Unavailable on Windows)")
+            self.active_net_status_badge.setStyleSheet(
+                "background: #78350f; color: #fde68a; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
+            QMessageBox.warning(self, "Network Emulation Notice", msg)
+
+    def _handle_reset_trans_network(self):
+        success, msg = self.network_controller.reset_configuration()
+        self._active_profile = None
+        self.trans_profile_combo.setCurrentIndex(0)
+        self.active_net_status_badge.setText("Active Profile: None (Unshaped Baseline)")
+        self.active_net_status_badge.setStyleSheet(
+            "background: #0f172a; color: #38bdf8; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+        )
+        QMessageBox.information(self, "Network Reset", msg)
+
     def set_active_network_profile(self, profile: NetworkProfile | None):
         """Sets active traffic shaping profile for telemetry and theoretical time calculation."""
         self._active_profile = profile
+        if profile is not None:
+            # Sync dropdown selection
+            idx = -1
+            for i in range(self.trans_profile_combo.count()):
+                p = self.trans_profile_combo.itemData(i)
+                if p and p.name == profile.name:
+                    idx = i
+                    break
+            if idx >= 0:
+                self.trans_profile_combo.blockSignals(True)
+                self.trans_profile_combo.setCurrentIndex(idx)
+                self.trans_profile_combo.blockSignals(False)
+            self.trans_profile_desc_lbl.setText(profile.description)
+            self.lbl_bw_val.setText(profile.bandwidth_display)
+            self.lbl_delay_val.setText(f"{profile.delay_ms} ms")
+            self.lbl_jitter_val.setText(f"±{profile.jitter_ms} ms")
+            self.lbl_loss_val.setText(f"{profile.loss_percent:.2f} %")
+            self.active_net_status_badge.setText(f"Active Profile: {profile.name}")
+            self.active_net_status_badge.setStyleSheet(
+                "background: #064e3b; color: #6ee7b7; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
+        else:
+            self.trans_profile_combo.blockSignals(True)
+            self.trans_profile_combo.setCurrentIndex(0)
+            self.trans_profile_combo.blockSignals(False)
+            self.trans_profile_desc_lbl.setText(
+                "Direct unshaped local link without artificial bandwidth throttling, delay, or packet loss."
+            )
+            self.lbl_bw_val.setText("Unlimited (Unshaped)")
+            self.lbl_delay_val.setText("0.0 ms")
+            self.lbl_jitter_val.setText("±0.0 ms")
+            self.lbl_loss_val.setText("0.00 %")
+            self.active_net_status_badge.setText("Active Profile: None (Unshaped Baseline)")
+            self.active_net_status_badge.setStyleSheet(
+                "background: #0f172a; color: #38bdf8; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
 
     def set_dataset_items(self, items: List[DatasetItem]):
         """Caches scanned dataset items for controlled batch execution."""
@@ -465,8 +935,10 @@ class SenderTransmissionView(QWidget):
             if meta is not None:
                 ratio = (meta.original_file_size / meta.compressed_file_size) if meta.compressed_file_size > 0 else 0.0
                 bw_str = self._active_profile.bandwidth if self._active_profile else "unshaped"
-                loss_val = self._active_profile.loss_percent if self._active_profile else 0.0
+                loss_val = float(self._active_profile.loss_percent) if self._active_profile else 0.0
                 delay_val = float(self._active_profile.delay_ms) if self._active_profile else 0.0
+                jitter_val = float(self._active_profile.jitter_ms) if self._active_profile else 0.0
+                prof_name = self._active_profile.name if self._active_profile else "Unshaped Baseline"
                 bw_bps = self._active_profile.bandwidth_bps if self._active_profile else 0.0
                 theo_time = compute_theoretical_transmission_time(meta.image_byte_length, bw_bps)
 
@@ -489,6 +961,8 @@ class SenderTransmissionView(QWidget):
                     bandwidth_limit=bw_str,
                     packet_loss_rate=loss_val,
                     network_delay_ms=delay_val,
+                    network_jitter_ms=jitter_val,
+                    network_profile=prof_name,
                     theoretical_transmission_time_sec=theo_time,
                     transmission_time_sec=report.wire_time_sec,
                     measured_throughput_kbps=report.throughput_kbps,
@@ -645,7 +1119,7 @@ class SenderTransmissionView(QWidget):
         net_combo = QComboBox()
         net_combo.addItem("Unshaped Baseline (Direct link, zero delay/loss)", None)
         for p in PRESET_PROFILES:
-            net_combo.addItem(f"{p.name} ({p.bandwidth}, {p.delay_ms}ms delay, {p.loss_percent}% loss)", p)
+            net_combo.addItem(f"{p.name} ({p.bandwidth_display}, {p.delay_ms}ms delay, ±{p.jitter_ms}ms jitter, {p.loss_percent}% loss)", p)
         net_layout.addWidget(net_combo)
         d_layout.addWidget(net_frame)
 
@@ -830,4 +1304,174 @@ class SenderTransmissionView(QWidget):
             f"• Skipped (Deduplicated): {skipped}\n"
             f"• Failed: {failed}\n\n"
             f"All metrics persistently recorded in SQLite database.\nCheck Results tab for analysis.",
+        )
+
+    # -------------------------------------------------------------
+    # One-Click Automated Experiment Handlers
+    # -------------------------------------------------------------
+    def _handle_select_test_images(self):
+        """Opens modal dialog allowing user to choose exactly 10 images from the held-out test split."""
+        dlg = TestImageSelectionDialog(self.selected_test_items, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.selected_test_items = dlg.get_selected_items()
+            self._update_selected_images_display()
+
+    def _update_selected_images_display(self):
+        count = len(self.selected_test_items)
+        self.lbl_selected_img_count.setText(f"Selected Images: {count} / 10 from held-out test split")
+        if count == 10:
+            self.lbl_selected_img_count.setStyleSheet(
+                "background: #064e3b; color: #34d399; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
+        else:
+            self.lbl_selected_img_count.setStyleSheet(
+                "background: #450a0a; color: #f87171; font-weight: 700; padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            )
+
+    def _handle_run_all_experiments(self):
+        """Validates prerequisites and executes the full automated experiment matrix."""
+        if len(self.selected_test_items) != 10:
+            QMessageBox.warning(
+                self,
+                "Selection Incomplete",
+                f"Exactly 10 test images are required before execution.\nCurrently selected: {len(self.selected_test_items)}.\n\n"
+                "Please click 'Select 10 Test Images...' to choose 10 images.",
+            )
+            return
+
+        self._sync_endpoint_from_inputs()
+
+        # Check receiver readiness
+        avail, rtt, msg = self.client.check_receiver_availability(timeout=2.0)
+        if not avail:
+            QMessageBox.warning(
+                self,
+                "Receiver Not Ready",
+                f"Cannot begin automated transmission:\n\n"
+                f"The Receiver is unreachable at {self.client.host}:{self.client.port}.\n\n"
+                f"Details: {msg}\n\n"
+                f"Please ensure the Receiver application (run_receiver.bat) is running and listening on port {self.client.port}.",
+            )
+            return
+
+        configs = get_supported_compression_configs()
+        profiles = list(PRESET_PROFILES)
+        total_trials = len(self.selected_test_items) * len(configs) * len(profiles)
+
+        # Confirm execution with user
+        reply = QMessageBox.question(
+            self,
+            "Confirm Automated Research Execution",
+            f"Ready to execute complete automated research matrix?\n\n"
+            f"• Images: {len(self.selected_test_items)} held-out test images\n"
+            f"• Compression Configurations ({len(configs)} total):\n"
+            f"   - 4 Uniform JPEG (Q30, Q50, Q70, Q90)\n"
+            f"   - 1 ML ROI Baseline (ROI Q90 + BG Q20)\n"
+            f"   - 3 ML ROI + JPEG Combinations (ROI Q90 + BG Q30, Q50, Q70)\n"
+            f"• Network Emulation Profiles ({len(profiles)} total):\n"
+            f"   - Hospital LAN, Broadband, 4G LTE, 3G Cellular, Rural Link, Satellite\n"
+            f"• Total Transmissions: {total_trials} over direct TCP link\n\n"
+            f"The receiver will receive, reconstruct, verify, and store every transmitted image under unique identifiers.\n"
+            f"Transmitted compressed images and per-run logs will be saved to a unique directory under experiments/runs/.\n\n"
+            f"Proceed with execution?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Prepare UI for running state
+        self.run_all_experiments_btn.setEnabled(False)
+        self.select_test_images_btn.setEnabled(False)
+        self.stop_auto_btn.setEnabled(True)
+        self.send_single_btn.setEnabled(False)
+        self.start_batch_btn.setEnabled(False)
+
+        self.auto_progress_bar.setValue(0)
+        self.auto_progress_bar.setFormat(f"Starting... (0 / {total_trials})")
+        self.auto_lbl_current_img.setText("Current Image: Initializing...")
+        self.auto_lbl_current_comp.setText("Current Compression: Initializing...")
+        self.auto_lbl_current_net.setText("Current Network Profile: Initializing...")
+        self.auto_lbl_counts.setText("Results: 0 Succeeded | 0 Failed")
+
+        # Launch background worker
+        self._auto_worker = AutomatedExperimentWorker(
+            runner=self.auto_runner,
+            items=self.selected_test_items,
+            configs=configs,
+            profiles=profiles,
+        )
+        self._auto_worker.progress_updated.connect(self._on_auto_progress_updated)
+        self._auto_worker.finished.connect(self._on_auto_finished)
+        self._auto_worker.start()
+
+    def _handle_stop_auto_experiments(self):
+        """Requests cooperative stop of automated experiment sequence."""
+        if self._auto_worker and self._auto_worker.isRunning():
+            self.stop_auto_btn.setEnabled(False)
+            self.auto_progress_bar.setFormat("Stopping safely... restoring network...")
+            self._auto_worker.stop()
+
+    def _on_auto_progress_updated(
+        self,
+        current: int,
+        total: int,
+        image_id: str,
+        config_name: str,
+        profile_name: str,
+        success_count: int,
+        failed_count: int,
+        record: Optional[ExperimentRecord],
+    ):
+        pct = (current * 100) // max(total, 1)
+        self.auto_progress_bar.setValue(pct)
+        self.auto_progress_bar.setFormat(f"{current} / {total} transmissions ({pct}%)")
+
+        self.auto_lbl_current_img.setText(f"Current Image: {image_id}")
+        self.auto_lbl_current_comp.setText(f"Current Compression: {config_name}")
+        self.auto_lbl_current_net.setText(f"Current Network Profile: {profile_name}")
+        self.auto_lbl_counts.setText(f"Results: {success_count} Succeeded | {failed_count} Failed")
+
+        if record:
+            self.trial_recorded.emit(record)
+
+            # Update live history table
+            row = self.history_table.rowCount()
+            self.history_table.insertRow(row)
+            self.history_table.setItem(row, 0, QTableWidgetItem(record.timestamp))
+            self.history_table.setItem(row, 1, QTableWidgetItem(record.image_id))
+            self.history_table.setItem(row, 2, QTableWidgetItem(f"{record.compression_method} ({record.compression_quality})"))
+            self.history_table.setItem(row, 3, QTableWidgetItem(str(record.transmitted_bytes or record.compressed_file_size)))
+            self.history_table.setItem(row, 4, QTableWidgetItem(f"{record.transmission_time_sec or 0.0:.4f}"))
+            self.history_table.setItem(row, 5, QTableWidgetItem(f"{record.measured_throughput_kbps or 0.0:,.2f}"))
+            ack_text = "Verified" if record.checksum_verified else "Failed"
+            self.history_table.setItem(row, 6, QTableWidgetItem(ack_text))
+
+    def _on_auto_finished(self, completed: bool, summary_msg: str, manifest: dict):
+        self.run_all_experiments_btn.setEnabled(True)
+        self.select_test_images_btn.setEnabled(True)
+        self.stop_auto_btn.setEnabled(False)
+        self.send_single_btn.setEnabled(True)
+        self.start_batch_btn.setEnabled(True)
+
+        succ = manifest.get("successful_transmissions", 0)
+        fail = manifest.get("failed_transmissions", 0)
+        total = manifest.get("total_planned_transmissions", 0)
+        run_dir = manifest.get("output_directory", "")
+
+        status_text = "Complete" if completed else "Stopped Early"
+        self.auto_progress_bar.setFormat(f"{status_text} ({succ} Succeeded, {fail} Failed)")
+
+        QMessageBox.information(
+            self,
+            "Automated Transmission Run Finished",
+            f"Automated Sequence {status_text}!\n\n"
+            f"• Successful & Verified: {succ} / {total}\n"
+            f"• Failed Transmissions: {fail}\n"
+            f"• Total Duration: {manifest.get('duration_seconds', 0.0)}s\n\n"
+            f"Output Artifacts Saved to:\n{run_dir}\n\n"
+            f"• Transmitted Compressed Images: {manifest.get('transmitted_images_directory')}\n"
+            f"• Per-Transmission CSV Log: {manifest.get('records_csv')}\n"
+            f"• Global SQLite database has been updated for all trials.",
         )
