@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from ui.sender.adaptive_view import SenderAdaptiveView
 from ui.sender.compression_view import SenderCompressionView
 from ui.sender.dashboard_view import SenderDashboardView
 from ui.sender.dataset_view import SenderDatasetView
@@ -65,7 +64,6 @@ class SenderMainWindow(QMainWindow):
             "Compression & Quality",
             "Network Emulation",
             "TCP Transmission",
-            "Adaptive Compression",
             "Experiment Results",
         ]
 
@@ -91,10 +89,6 @@ class SenderMainWindow(QMainWindow):
         self.compression_view = SenderCompressionView()
         self.network_view = SenderNetworkView()
         self.transmission_view = SenderTransmissionView(network_controller=self.network_view.controller)
-        self.adaptive_view = SenderAdaptiveView(
-            tcp_client=self.transmission_view.client,
-            network_controller=self.network_view.controller,
-        )
         self.results_view = SenderResultsView()
 
         self.stack.addWidget(self.dashboard_view)
@@ -102,7 +96,6 @@ class SenderMainWindow(QMainWindow):
         self.stack.addWidget(self.compression_view)
         self.stack.addWidget(self.network_view)
         self.stack.addWidget(self.transmission_view)
-        self.stack.addWidget(self.adaptive_view)
         self.stack.addWidget(self.results_view)
 
         main_layout.addWidget(self.stack, stretch=1)
@@ -115,9 +108,8 @@ class SenderMainWindow(QMainWindow):
         self._connect_view_signals()
 
     def _connect_view_signals(self):
-        # 1. Dataset selection forwards to Compression view, Adaptive view, and Dashboard
+        # 1. Dataset selection forwards to Compression view and Dashboard
         self.dataset_view.image_selected.connect(self.compression_view.load_dataset_item)
-        self.dataset_view.image_selected.connect(self.adaptive_view.set_dataset_item)
         self.dataset_view.image_selected.connect(self._on_image_selected)
 
         # 2. Dataset scan updates dashboard metrics & transmission batch cache
@@ -127,22 +119,17 @@ class SenderMainWindow(QMainWindow):
         self.compression_view.compression_completed.connect(self.transmission_view.set_payload)
         self.compression_view.compression_completed.connect(self._on_compression_completed)
 
-        # 4. Network profile change updates Transmission view, Adaptive view, and Dashboard
+        # 4. Network profile change updates Transmission view and Dashboard
         self.network_view.profile_changed.connect(self.transmission_view.set_active_network_profile)
-        self.network_view.profile_changed.connect(self.adaptive_view.set_active_network_profile)
         self.network_view.profile_changed.connect(self._on_network_profile_changed)
 
         # 5. Connection state sync
         self.transmission_view.connection_changed.connect(self.dashboard_view.update_connection_state)
         self.dashboard_view.test_connection_requested.connect(self.transmission_view._handle_probe)
 
-        # 6. Recorded trials update Results view, Dashboard, and Adaptive EWMA
+        # 6. Recorded trials update Results view and Dashboard
         self.transmission_view.trial_recorded.connect(self.results_view.load_records)
         self.transmission_view.trial_recorded.connect(self._on_trial_recorded)
-        self.transmission_view.trial_recorded.connect(self._on_transmission_trial_recorded)
-
-        self.adaptive_view.trial_recorded.connect(self.results_view.load_records)
-        self.adaptive_view.trial_recorded.connect(self._on_trial_recorded)
 
     def _on_image_selected(self, item):
         if item is not None:
@@ -178,8 +165,4 @@ class SenderMainWindow(QMainWindow):
         self.dashboard_view.card_ack.set_value(ack_val)
         self.dashboard_view.progress_bar.setValue(100)
         self.dashboard_view.progress_bar.setFormat(f"Transfer Done ({record.image_id})")
-
-    def _on_transmission_trial_recorded(self, record):
-        if record.measured_throughput_kbps and record.measured_throughput_kbps > 0:
-            self.adaptive_view.update_measured_throughput(record.measured_throughput_kbps)
 

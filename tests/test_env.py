@@ -114,7 +114,7 @@ class TestGUIInitialization(unittest.TestCase):
         from ui.sender.main_window import SenderMainWindow
         window = SenderMainWindow()
         self.assertIsNotNone(window)
-        self.assertEqual(window.stack.count(), 7)
+        self.assertEqual(window.stack.count(), 6)
 
     def test_receiver_window_init(self):
         from ui.receiver.main_window import ReceiverMainWindow
